@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: planeador-preenfrio
+    runtime: python
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python lanzador_render.py
+    healthCheckPath: /
+    autoDeploy: true
