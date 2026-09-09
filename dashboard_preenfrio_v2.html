@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Planeador V2.2</title>
+    <style>
+        :root {
+            --g: #079653;
+            --dg: #05633f;
+            --blue: #2868c9;
+            --red: #df3037;
+            --purple: #8d2bd1;
+            --orange: #df5704;
+            --bg: #f3f7f5
+        }
+
+        * {
+            box-sizing: border-box
+        }
+
+        body {
+            margin: 0;
+            font: 13px Segoe UI, Arial;
+            background: var(--bg);
+            color: #14221d
+        }
+
+        header {
+            padding: 19px 22px;
+            color: white;
+            background: linear-gradient(110deg, var(--dg), #00a651);
+            display: flex;
+            justify-content: space-between;
+            align-items: center
+        }
+
+        h1 {
+            margin: 0 0 4px;
+            font-size: 27px
+        }
+
+        .wrap {
+            padding: 14px
+        }
+
+        .card {
+            background: white;
+            border-radius: 13px;
+            box-shadow: 0 4px 18px #1232;
+            padding: 14px;
+            margin-bottom: 13px
+        }
+
+        .kpis {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 11px
+        }
+
+        .kpi {
+            display: grid;
+            grid-template-columns: 48px 1fr;
+            grid-template-rows: auto auto auto;
+            column-gap: 10px;
+            align-items: center;
+            min-height: 105px
+        }
+
+        .ico {
+            grid-row: 1/4;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-size: 23px;
+            font-weight: 900;
+            background: var(--g)
+        }
+
+        .kpi:nth-child(2) .ico,
+        .kpi:nth-child(5) .ico {
+            background: var(--blue)
+        }
+
+        .kpi:nth-child(4) .ico {
+            background: var(--red)
+        }
+
+        .kpi:nth-child(6) .ico {
+            background: var(--purple)
+        }
+
+        .num {
+            font-size: 27px;
+            font-weight: 850
+        }
+
+        .label {
+            font-size: 10px
+        }
+
+        .sub {
+            font-size: 11px;
+            color: #64748b
+        }
+
+        .filters {
+            display: grid;
+            grid-template-columns: 1.1fr .8fr 1fr 1fr 1fr auto auto auto;
+            gap: 9px;
+            align-items: end
+        }
+
+        .fb {
+            display: flex;
+            flex-direction: column;
+            gap: 5px
+        }
+
+        .fb label {
+            font-weight: 650;
+            color: #334155
+        }
+
+        .fb select,
+        .dateBtn,
+        .btn {
+            padding: 9px;
+            border: 1px solid #cad7d2;
+            border-radius: 8px;
+            background: #fff
+        }
+
+        .btn {
+            font-weight: 800;
+            color: #076b47;
+            cursor: pointer
+        }
+
+        .multi {
+            position: relative
+        }
+
+        .menu {
+            display: none;
+            position: absolute;
+            z-index: 60;
+            background: #fff;
+            border: 1px solid #cad7d2;
+            border-radius: 9px;
+            padding: 9px;
+            min-width: 230px;
+            max-height: 285px;
+            overflow: auto;
+            box-shadow: 0 12px 28px #0003
+        }
+
+        .multi.open .menu {
+            display: block
+        }
+
+        .menu label {
+            display: block;
+            padding: 5px
+        }
+
+        .scroll {
+            overflow: auto;
+            max-height: 610px
+        }
+
+        .grid {
+            min-width: 2480px
+        }
+
+        .head,
+        .row {
+            display: grid;
+            grid-template-columns: 88px 74px 165px 115px 105px 160px 72px 105px 145px 145px 100px minmax(700px, 1fr);
+            gap: 7px;
+            align-items: center
+        }
+
+        .head {
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            height: 66px;
+            background: var(--orange);
+            color: #fff;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 800
+        }
+
+        .row {
+            padding: 8px 10px;
+            border-bottom: 1px solid #e2e9e6;
+            background: #fff
+        }
+
+        .row.late {
+            background: #fff3f3
+        }
+
+        .originEdit {
+            width: 100%;
+            padding: 6px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-weight: 800
+        }
+
+        .orderBtns {
+            display: flex;
+            align-items: center;
+            gap: 3px
+        }
+
+        .move {
+            border: 0;
+            border-radius: 5px;
+            padding: 4px 5px;
+            cursor: pointer;
+            background: #eef1f4
+        }
+
+        .timeHead {
+            height: 66px;
+            display: grid;
+            grid-template-rows: 28px 38px
+        }
+
+        .timeTitle {
+            text-align: center;
+            padding-top: 7px
+        }
+
+        .days {
+            display: flex;
+            height: 38px;
+            background: #e5eeea;
+            color: #07543d
+        }
+
+        .days span {
+            flex: 0 0 var(--dw);
+            text-align: center;
+            border-right: 1px solid #c1d1ca;
+            padding-top: 3px;
+            font-weight: 800
+        }
+
+        .days small {
+            display: block;
+            font-size: 9px
+        }
+
+        .track {
+            height: 33px;
+            position: relative;
+            background: repeating-linear-gradient(90deg, #edf3f0 0, #edf3f0 calc(var(--dw) - 1px), #d7e2dd calc(var(--dw) - 1px), #d7e2dd var(--dw))
+        }
+
+        .bar {
+            position: absolute;
+            top: 6px;
+            height: 21px;
+            border-radius: 5px;
+            cursor: pointer;
+            box-shadow: 0 2px 5px #0002
+        }
+
+        .bar.n {
+            background: linear-gradient(90deg, #7e29ca, #a143e7)
+        }
+
+        .bar.f {
+            background: linear-gradient(90deg, #079653, #15b86b)
+        }
+
+        .bar.late {
+            background: linear-gradient(90deg, #d9212d, #ef4b50)
+        }
+
+        .appt {
+            position: absolute;
+            top: 8px;
+            width: 11px;
+            height: 11px;
+            background: var(--purple);
+            transform: rotate(45deg)
+        }
+
+        .ok {
+            color: #078b45;
+            font-weight: 900
+        }
+
+        .bad {
+            color: #cf202b;
+            font-weight: 900
+        }
+
+        .direct {
+            border-top: 4px solid #f59e0b
+        }
+
+        .direct h2 {
+            color: #9a3412
+        }
+
+        .direct table {
+            width: 100%;
+            border-collapse: collapse
+        }
+
+        .direct th {
+            background: #fff7ed;
+            color: #9a3412;
+            text-align: left
+        }
+
+        .direct td,
+        .direct th {
+            padding: 8px;
+            border-bottom: 1px solid #fed7aa
+        }
+
+        .tipbox {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            background: #172025f7;
+            color: #fff;
+            padding: 15px;
+            border-radius: 12px;
+            min-width: 285px;
+            box-shadow: 0 14px 40px #0006;
+            pointer-events: none
+        }
+
+        .tipbox h3 {
+            margin: 0 0 10px;
+            color: #76e5a5
+        }
+
+        .tiprow {
+            display: grid;
+            grid-template-columns: 125px 1fr;
+            gap: 8px;
+            margin: 6px
+        }
+
+        .tiprow b {
+            text-align: right
+        }
+
+        @media(max-width:1100px) {
+            .kpis {
+                grid-template-columns: repeat(2, 1fr)
+            }
+
+            .filters {
+                grid-template-columns: repeat(2, 1fr)
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div>
+            <h1>Planeador de Preenfrío</h1>
+            <div>Asignación editable · Contingencia directa · SMART se preenfría en Nelly</div>
+        </div>
+        <div id="updated">Preparando...</div>
+    </header>
+    <main class="wrap">
+        <div class="kpis">
+            <div class="card kpi"><i class="ico">◇</i><b class="num" id="jobs">0</b><span
+                    class="label">PROCESOS</span><small class="sub">Programados</small></div>
+            <div class="card kpi"><i class="ico">◷</i><b class="num" id="cycles">0</b><span
+                    class="label">CICLOS</span><small class="sub">Calculados</small></div>
+            <div class="card kpi"><i class="ico">✓</i><b class="num" id="yes">0</b><span
+                    class="label">CUMPLEN</span><small class="sub">Citas cumplidas</small></div>
+            <div class="card kpi"><i class="ico">×</i><b class="num" id="no">0</b><span class="label">NO
+                    CUMPLEN</span><small class="sub">Requieren decisión</small></div>
+            <div class="card kpi"><i class="ico">❄</i><b class="num" id="nelly">0%</b><span class="label">OCUPACIÓN
+                    NELLY</span><small class="sub" id="np">Capacidad 12</small></div>
+            <div class="card kpi"><i class="ico">❄</i><b class="num" id="fort">0%</b><span class="label">OCUPACIÓN
+                    FORTALEZA</span><small class="sub" id="fp">Capacidad 10</small></div>
+        </div>
+        <section class="card filters">
+            <div class="fb"><label>Fechas de proceso</label>
+                <div class="multi" id="multi"><button class="dateBtn" id="dateBtn">Todas las fechas</button>
+                    <div class="menu"><button id="allDates">Todas</button> <button id="clearDates">Limpiar</button>
+                        <div id="dateChecks"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="fb"><label>Semana</label><select id="week">
+                    <option value="">Todas</option>
+                </select></div>
+            <div class="fb"><label>Destino</label><select id="dest">
+                    <option value="">Todos</option>
+                </select></div>
+            <div class="fb"><label>Preenfrío</label><select id="origin">
+                    <option value="">Todos</option>
+                    <option>NELLY</option>
+                    <option>FORTALEZA</option>
+                    <option>DIRECTO SIN PREENFRIO</option>
+                </select></div>
+            <div class="fb"><label>Estado</label><select id="state">
+                    <option value="">Todos</option>
+                    <option>CUMPLE</option>
+                    <option>NO CUMPLE</option>
+                </select></div><button class="btn" id="refresh">↻ Actualizar</button><button class="btn"
+                id="importBtn">↑ Importar plan</button><button class="btn" id="exportBtn">↓ Exportar
+                Excel</button><input hidden id="importFile" type="file" accept=".xlsx">
+        </section>
+        <section class="card">
+            <div class="scroll">
+                <div id="view">Cargando...</div>
+            </div>
+        </section>
+        <section class="card direct">
+            <h2>Plan de contingencia · Directo sin preenfrío</h2>
+            <div id="directView">Sin procesos asignados.</div>
+        </section>
+    </main>
+    <div id="tip" class="tipbox"></div>
+    <script>
+        let DATA = [], CYC = [], OV = {};
+        const $ = id => document.getElementById(id), D = x => new Date(x), N = x => Number(x) || 0, K = x => String(x).slice(0, 10), fmt = x => D(x).toLocaleString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }), fd = x => D(x).toLocaleDateString('es-MX');
+        function selectedDates() { return [...document.querySelectorAll('.dc:checked')].map(x => x.value) } function opts(id, v, p = '') { const e = $(id), first = e.options[0].outerHTML, old = e.value; e.innerHTML = first + [...new Set(v)].sort().map(x => `<option value="${x}">${p}${x}</option>`).join(''); if ([...e.options].some(x => x.value === old)) e.value = old } function buildDates() { const old = new Set(selectedDates()), ds = [...new Set(DATA.map(x => K(x.process_date)))].sort(); $('dateChecks').innerHTML = ds.map(d => `<label><input class="dc" type="checkbox" value="${d}" ${!old.size || old.has(d) ? 'checked' : ''}> ${d.split('-').reverse().join('/')}</label>`).join(''); document.querySelectorAll('.dc').forEach(x => x.onchange = render); updateDateLabel() } function updateDateLabel() { const n = selectedDates().length, t = document.querySelectorAll('.dc').length; $('dateBtn').textContent = n === t ? 'Todas las fechas' : n === 0 ? 'Ninguna fecha' : n === 1 ? selectedDates()[0].split('-').reverse().join('/') : n + ' fechas seleccionadas' } function applyPayload(p) { DATA = p.data; CYC = p.cycles; buildDates(); opts('week', DATA.map(x => x.week), 'Semana '); opts('dest', DATA.map(x => x.destination)); $('updated').textContent = 'Última actualización: ' + new Date().toLocaleString('es-MX'); render() } async function load() { const p = await (await fetch('/api/datos?t=' + Date.now())).json(); if (!p.ok) throw Error(p.error); OV = {}; applyPayload(p) }
+        function visibleRows() { const ds = selectedDates(), w = $('week').value, z = $('dest').value, o = $('origin').value, s = $('state').value; return DATA.filter(x => (!ds.length || ds.includes(K(x.process_date))) && (!w || x.week === w) && (!z || x.destination === z) && (!o || x.assigned_origin === o) && (!s || x.status === s)) } function occupancy(a, o) { const c = CYC.filter(x => x.origin === o && a.some(r => K(r.process_date) === K(x.process_date) && r.assigned_origin === o)); return c.length ? c.reduce((s, x) => s + N(x.used_pallets) / N(x.capacity) * 100, 0) / c.length : 0 } async function replan() { const p = await (await fetch('/api/replan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ overrides: OV }) })).json(); if (!p.ok) throw Error(p.error); applyPayload(p) } function setOrigin(x, v) { if (v === 'DIRECTO SIN PREENFRIO' && !confirm('¿Asignar ' + x.destination + ' como contingencia directa?')) { render(); return } OV[x.key] = { ...(OV[x.key] || {}), origin: v, order: x.order }; replan() } function move(x, d) { if (x.assigned_origin === 'DIRECTO SIN PREENFRIO') return; const p = DATA.filter(r => K(r.process_date) === K(x.process_date) && r.assigned_origin === x.assigned_origin).sort((a, b) => a.order - b.order), i = p.findIndex(r => r.key === x.key), j = i + d; if (j < 0 || j >= p.length) return; p.forEach((r, k) => OV[r.key] = { ...(OV[r.key] || {}), origin: r.assigned_origin, order: k + 1 });[OV[p[i].key].order, OV[p[j].key].order] = [OV[p[j].key].order, OV[p[i].key].order]; replan() }
+        function tooltip(x) { return `<h3>${x.destination}</h3><div class="tiprow"><span>Finca:</span><b>${x.farm || ''}</b></div><div class="tiprow"><span>Cliente:</span><b>${x.client}</b></div><div class="tiprow"><span>Asignación:</span><b>${x.assigned_origin}</b></div><div class="tiprow"><span>Despacho:</span><b>${fmt(x.end)}</b></div><div class="tiprow"><span>${x.slack_h < 0 ? 'Retraso' : 'Holgura'}:</span><b>${Math.abs(x.slack_h).toFixed(1)} h</b></div>` } function bind() { document.querySelectorAll('.bar').forEach(b => { b.onmouseenter = () => { $('tip').innerHTML = tooltip(DATA.find(x => x.key === b.dataset.key)); $('tip').style.display = 'block' }; b.onmousemove = e => { $('tip').style.left = Math.min(innerWidth - 305, e.clientX + 14) + 'px'; $('tip').style.top = Math.min(innerHeight - $('tip').offsetHeight - 10, e.clientY + 14) + 'px' }; b.onmouseleave = () => $('tip').style.display = 'none' }); document.querySelectorAll('.originEdit').forEach(e => e.onchange = () => setOrigin(DATA.find(x => x.key === e.dataset.key), e.value)); document.querySelectorAll('.move').forEach(e => e.onclick = () => move(DATA.find(x => x.key === e.dataset.key), N(e.dataset.delta))) } function directTable() { const a = DATA.filter(x => x.assigned_origin === 'DIRECTO SIN PREENFRIO'); if (!a.length) { $('directView').textContent = 'Sin procesos asignados.'; return } $('directView').innerHTML = '<table><tr><th>Fecha</th><th>Finca</th><th>Cliente</th><th>Destino</th><th>Tarimas</th><th>Despacho</th><th>Llegada</th><th>Cita</th><th>Estado</th></tr>' + a.map(x => `<tr><td>${fd(x.process_date)}</td><td>${x.farm || ''}</td><td>${x.client}</td><td>${x.destination}</td><td>${N(x.pallets).toFixed(1)}</td><td>${fmt(x.end)}</td><td>${fmt(x.arrival)}</td><td>${fd(x.appointment)}</td><td class="${x.status === 'CUMPLE' ? 'ok' : 'bad'}">${x.status}</td></tr>`).join('') + '</table>' }
+        function render() { updateDateLabel(); const a = visibleRows(); $('jobs').textContent = a.length; $('yes').textContent = a.filter(x => x.status === 'CUMPLE').length; $('no').textContent = a.filter(x => x.status === 'NO CUMPLE').length; $('nelly').textContent = occupancy(a, 'NELLY').toFixed(1) + '%'; $('fort').textContent = occupancy(a, 'FORTALEZA').toFixed(1) + '%'; $('np').textContent = a.filter(x => x.assigned_origin === 'NELLY').reduce((s, x) => s + N(x.pallets), 0).toFixed(1) + ' tarimas · cap. 12'; $('fp').textContent = a.filter(x => x.assigned_origin === 'FORTALEZA').reduce((s, x) => s + N(x.pallets), 0).toFixed(1) + ' tarimas · cap. 10'; $('cycles').textContent = CYC.length; directTable(); if (!a.length) { $('view').textContent = 'Sin datos'; return } const s0 = new Date(Math.min(...a.map(x => +D(x.start)))), s1 = new Date(Math.max(...a.map(x => Math.max(+D(x.end), +D(x.appointment))))); s0.setHours(0, 0, 0, 0); s1.setHours(0, 0, 0, 0); s1.setDate(s1.getDate() + 1); const span = s1 - s0, pos = x => (+D(x) - s0) / span * 100, dw = 864e5 / span * 100, days = []; for (let q = new Date(s0); q < s1; q.setDate(q.getDate() + 1))days.push(new Date(q)); const L = ['D', 'L', 'M', 'M', 'J', 'V', 'S'], scale = '<div class="days" style="--dw:' + dw + '%">' + days.map(x => `<span>${L[x.getDay()]}<small>${x.getDate()}/${x.getMonth() + 1}</small></span>`).join('') + '</div>'; let h = '<div class="grid"><div class="head"><span>Fecha</span><span>Orden</span><span>Finca</span><span>Cliente</span><span>Destino</span><span>Preenfrío</span><span>Tarimas</span><span>Cita</span><span>Ingreso</span><span>Despacho</span><span>Estado</span><span class="timeHead"><b class="timeTitle">Línea de tiempo</b>' + scale + '</span></div>'; for (const x of a.sort((x, y) => x.process_date.localeCompare(y.process_date) || x.assigned_origin.localeCompare(y.assigned_origin) || x.order - y.order)) { const direct = x.assigned_origin === 'DIRECTO SIN PREENFRIO', late = x.status === 'NO CUMPLE', cl = late ? 'late' : x.assigned_origin === 'NELLY' ? 'n' : 'f'; h += `<div class="row ${late ? 'late' : ''}"><span>${fd(x.process_date)}</span><span class="orderBtns"><button class="move" data-key="${x.key}" data-delta="-1" ${direct ? 'disabled' : ''}>▲</button><b>${direct ? '—' : x.order}</b><button class="move" data-key="${x.key}" data-delta="1" ${direct ? 'disabled' : ''}>▼</button></span><span>${x.farm || ''}</span><span>${x.client}</span><span>${x.destination}</span><select class="originEdit" data-key="${x.key}"><option ${x.assigned_origin === 'NELLY' ? 'selected' : ''}>NELLY</option><option ${x.assigned_origin === 'FORTALEZA' ? 'selected' : ''}>FORTALEZA</option><option ${direct ? 'selected' : ''}>DIRECTO SIN PREENFRIO</option></select><span>${N(x.pallets).toFixed(1)}</span><span>${fd(x.appointment)}</span><span>${fmt(x.start)}</span><span>${fmt(x.end)}</span><span class="${late ? 'bad' : 'ok'}">${x.status}</span><div class="track" style="--dw:${dw}%">${direct ? '' : `<i class="bar ${cl}" data-key="${x.key}" style="left:${pos(x.start)}%;width:${Math.max(.4, pos(x.end) - pos(x.start))}%"></i>`}<i class="appt" style="left:${pos(x.appointment)}%"></i></div></div>` } $('view').innerHTML = h + '</div>'; bind() }
+        $('refresh').onclick = load;['week', 'dest', 'origin', 'state'].forEach(id => $(id).onchange = render); $('dateBtn').onclick = () => $('multi').classList.toggle('open'); $('allDates').onclick = () => { document.querySelectorAll('.dc').forEach(x => x.checked = true); render() }; $('clearDates').onclick = () => { document.querySelectorAll('.dc').forEach(x => x.checked = false); render() }; $('exportBtn').onclick = () => location.href = '/api/exportar'; $('importBtn').onclick = () => $('importFile').click(); $('importFile').onchange = async e => { const f = e.target.files[0]; if (!f) return; const p = await (await fetch('/api/importar', { method: 'POST', body: await f.arrayBuffer() })).json(); if (!p.ok) alert(p.error); else { OV = {}; applyPayload(p) } }; load();
+    </script>
+</body>
+
+</html>
