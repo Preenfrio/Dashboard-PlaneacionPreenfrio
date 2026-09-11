@@ -197,106 +197,262 @@ def allowed(job):
     return [o for o in ("NELLY", "FORTALEZA") if job["cycle_options"][o] > 0]
 
 
+def release_time(job):
+    """Hora en que la fruta queda disponible para entrar a preenfrio."""
+    return datetime.combine(job["process_date"].date(), time(START_HOUR))
+
+
 def pack(origin, sequence):
+    """Construye una sola cola cronologica por preenfrio, sin reiniciar por dia."""
     if not sequence:
         return [], []
     capacity = CAP[origin]
-    current = datetime.combine(sequence[0]["process_date"].date(), time(START_HOUR))
+    sequence = sorted(sequence, key=lambda j: (release_time(j), j.get("manual_order", 9999), j["critical"], j["appointment"], j["source"]))
     remaining = {j["key"]: j["pallets"] for j in sequence}
     first, last, cycles = {}, {}, []
-    i = 0
-    while i < len(sequence):
+    pending = list(sequence)
+    current = min(release_time(j) for j in pending)
+
+    while pending:
+        available = [j for j in pending if release_time(j) <= current]
+        if not available:
+            current = min(release_time(j) for j in pending)
+            available = [j for j in pending if release_time(j) <= current]
+        available.sort(key=lambda j: (j.get("manual_order", 9999), j["critical"], j["appointment"], j["source"]))
+
         space, loads, duration = capacity, [], 0.0
-        while space > 1e-9 and i < len(sequence):
-            job = sequence[i]
+        for job in available:
+            if space <= 1e-9:
+                break
             qty = min(space, remaining[job["key"]])
-            loads.append({"key": job["key"], "destination": job["destination"], "pallets": qty})
+            if qty <= 1e-9:
+                continue
+            loads.append({"key": job["key"], "destination": job["destination"], "farm": job.get("farm", ""), "pallets": qty})
             duration = max(duration, job["cycle_options"][origin])
             first.setdefault(job["key"], current)
             remaining[job["key"]] -= qty
             space -= qty
-            if remaining[job["key"]] <= 1e-9:
-                i += 1
+
         end = current + timedelta(hours=duration)
-        cycles.append({"cycle_no": len(cycles) + 1, "origin": origin, "process_date": sequence[0]["process_date"], "start": current, "end": end, "duration_h": duration, "capacity": capacity, "used_pallets": capacity - space, "free_pallets": space, "loads": loads})
+        cycles.append({
+            "cycle_no": len(cycles) + 1,
+            "origin": origin,
+            "process_date": current.replace(hour=0, minute=0, second=0, microsecond=0),
+            "start": current,
+            "end": end,
+            "duration_h": duration,
+            "capacity": capacity,
+            "used_pallets": capacity - space,
+            "free_pallets": space,
+            "loads": loads,
+        })
+        completed = []
         for load in loads:
-            if remaining[load["key"]] <= 1e-9:
-                last[load["key"]] = end
+            key = load["key"]
+            if remaining[key] <= 1e-9:
+                last[key] = end
+                completed.append(key)
+        pending = [j for j in pending if j["key"] not in completed]
         current = end + timedelta(minutes=GAP_MIN)
+
     rows = []
-    for order, job in enumerate(sequence, 1):
+    order_by_day = {}
+    for job in sequence:
         end = last[job["key"]]
         arrival = end + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
-        rows.append({**job, "assigned_origin": origin, "assigned_distance_km": job["distance_options_km"].get(origin), "order": order, "start": first[job["key"]], "end": end, "arrival": arrival, "slack_h": slack, "status": "CUMPLE" if slack >= 0 else "NO CUMPLE"})
+        day_key = (job["process_date"].date(), origin)
+        order_by_day[day_key] = order_by_day.get(day_key, 0) + 1
+        rows.append({
+            **job,
+            "assigned_origin": origin,
+            "assigned_distance_km": job["distance_options_km"].get(origin),
+            "order": order_by_day[day_key],
+            "start": first[job["key"]],
+            "end": end,
+            "arrival": arrival,
+            "slack_h": slack,
+            "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
+        })
     return rows, cycles
 
 
-def automatic(jobs):
-    groups = {}
-    for job in jobs:
-        groups.setdefault(job["process_date"].date(), []).append(job)
-    assignments = {}
-    for date, group in groups.items():
-        queues = {"NELLY": [], "FORTALEZA": []}
-        # La prioridad existente se mantiene: cita, criticidad y orden de origen.
-        for job in sorted(group, key=lambda x: (x["appointment"], x["critical"], x["source"])):
-            best = None
-            for origin in allowed(job):
-                test_rows, _ = pack(origin, queues[origin] + [job])
-                candidate = next(x for x in test_rows if x["key"] == job["key"])
-                distance = job["distance_options_km"].get(origin)
-                # Jerarquía: 1) cumplir la cita, 2) menor retraso/mayor holgura,
-                # 3) menor distancia en línea recta, 4) menos ciclos/carga.
-                score = (
-                    0 if candidate["status"] == "CUMPLE" else 1,
-                    max(0.0, -candidate["slack_h"]),
-                    distance if distance is not None else 1_000_000.0,
-                    -candidate["slack_h"] if candidate["status"] == "CUMPLE" else 0.0,
-                    len(test_rows),
-                )
-                if best is None or score < best[0]:
-                    best = (score, origin)
-            if best:
-                queues[best[1]].append(job)
-        for origin, queue in queues.items():
-            for order, job in enumerate(queue, 1):
-                assignments[job["key"]] = {"origin": origin, "order": order}
-    return assignments
+def _plan_from_queues(queues):
+    rows, cycles = [], []
+    for origin in ("NELLY", "FORTALEZA"):
+        r, c = pack(origin, queues[origin])
+        rows.extend(r)
+        cycles.extend(c)
+    return rows, cycles
 
+
+def _plan_score(queues):
+    """Puntuacion lexicografica: primero se protege la criticidad mas alta.
+
+    Para cada nivel, empezando por 1, se compara:
+      1) cantidad de incumplimientos;
+      2) horas de retraso acumuladas.
+    Solo despues se consideran el total, distancia y numero de ciclos.
+    """
+    rows, cycles = _plan_from_queues(queues)
+    levels = sorted({max(1, int(r.get("critical", 99))) for r in rows})
+    # Incluye 1..9 aunque algun nivel no aparezca, para que el criterio sea estable.
+    levels = sorted(set(range(1, 10)) | set(levels))
+    score = []
+    for level in levels:
+        same = [r for r in rows if max(1, int(r.get("critical", 99))) == level]
+        score.extend([
+            sum(r["status"] == "NO CUMPLE" for r in same),
+            round(sum(max(0.0, -r["slack_h"]) for r in same), 6),
+        ])
+    score.extend([
+        sum(r["status"] == "NO CUMPLE" for r in rows),
+        round(sum(max(0.0, -r["slack_h"]) for r in rows), 6),
+        round(sum((r.get("assigned_distance_km") or 0.0) for r in rows), 6),
+        len(cycles),
+    ])
+    return tuple(score)
+
+
+def _normalise_queues(queues):
+    """Mantiene disponibilidad por fecha; dentro del dia prioriza criticidad/cita."""
+    out = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
+    for origin in out:
+        out[origin].sort(key=lambda j: (
+            release_time(j),
+            j.get("critical", 99),
+            j.get("appointment"),
+            j.get("source", 999999),
+        ))
+    return out
+
+
+def automatic(jobs):
+    """Optimiza asignacion y secuencia protegiendo criticidad y citas.
+
+    No pone ciegamente todo nivel 1 antes: evalua el resultado final. Si dar paso
+    a otro proceso permite cumplir ambos sin perjudicar niveles superiores, lo usa.
+    Si hay conflicto inevitable, evita primero incumplir nivel 1, luego 2, etc.
+    """
+    ordered = sorted(jobs, key=lambda j: (
+        release_time(j), j.get("critical", 99), j["appointment"], j["source"]
+    ))
+    queues = {"NELLY": [], "FORTALEZA": []}
+
+    # Construccion inicial: para cada proceso prueba todas las camaras permitidas
+    # y posiciones factibles dentro del mismo dia.
+    for job in ordered:
+        best = None
+        for origin in allowed(job):
+            base = list(queues[origin])
+            same_day_positions = [i for i in range(len(base) + 1)
+                                  if i == len(base) or base[i]["process_date"].date() >= job["process_date"].date()]
+            for pos in same_day_positions:
+                trial = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
+                trial[origin].insert(pos, job)
+                # Nunca adelantar fruta antes de su disponibilidad; pack() tambien lo valida.
+                score = _plan_score(trial)
+                tie = (score, origin != "NELLY", pos)
+                if best is None or tie < best[0]:
+                    best = (tie, trial)
+        if best is not None:
+            queues = best[1]
+
+    # Mejora local: intercambios adyacentes y cambios de camara hasta estabilizar.
+    queues = _normalise_queues(queues)
+    best_score = _plan_score(queues)
+    improved = True
+    passes = 0
+    while improved and passes < 12:
+        improved = False
+        passes += 1
+
+        # 1) Intercambios dentro de la misma camara y misma fecha de proceso.
+        for origin in ("NELLY", "FORTALEZA"):
+            for i in range(len(queues[origin]) - 1):
+                a, b = queues[origin][i], queues[origin][i + 1]
+                if a["process_date"].date() != b["process_date"].date():
+                    continue
+                trial = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
+                trial[origin][i], trial[origin][i + 1] = trial[origin][i + 1], trial[origin][i]
+                score = _plan_score(trial)
+                if score < best_score:
+                    queues, best_score, improved = trial, score, True
+                    break
+            if improved:
+                break
+        if improved:
+            continue
+
+        # 2) Mover procesos no SMART a la otra camara y probar posiciones del mismo dia.
+        for origin in ("NELLY", "FORTALEZA"):
+            other = "FORTALEZA" if origin == "NELLY" else "NELLY"
+            for i, job in enumerate(list(queues[origin])):
+                if other not in allowed(job):
+                    continue
+                reduced = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
+                reduced[origin].pop(i)
+                for pos in range(len(reduced[other]) + 1):
+                    trial = {"NELLY": list(reduced["NELLY"]), "FORTALEZA": list(reduced["FORTALEZA"])}
+                    trial[other].insert(pos, job)
+                    score = _plan_score(trial)
+                    if score < best_score:
+                        queues, best_score, improved = trial, score, True
+                        break
+                if improved:
+                    break
+            if improved:
+                break
+
+    # Orden que recibe recalc(). Se numera por dia/camara para conservar las flechas.
+    assignments = {}
+    for origin in ("NELLY", "FORTALEZA"):
+        counters = {}
+        for job in queues[origin]:
+            day = job["process_date"].date()
+            counters[day] = counters.get(day, 0) + 1
+            assignments[job["key"]] = {"origin": origin, "order": counters[day]}
+    return assignments
 
 def recalc(overrides=None):
     jobs = read_jobs()
     auto = automatic(jobs)
     ov = overrides if overrides is not None else STATE["overrides"]
-    groups = {}
+    queues = {"NELLY": [], "FORTALEZA": []}
+    direct = []
+
     for job in jobs:
         if job["key"] not in auto:
             continue
         chosen = ov.get(job["key"], auto[job["key"]])
         origin = chosen.get("origin") or auto[job["key"]]["origin"]
-        order = int(chosen.get("order") or auto[job["key"]]["order"])
-        if origin != "DIRECTO SIN PREENFRIO":
-            if job["client"] == "SMART":
-                origin = "NELLY"
-            if origin not in allowed(job):
-                origin = auto[job["key"]]["origin"]
-        groups.setdefault((job["process_date"].date(), origin), []).append((order, job))
-    rows, cycles = [], []
-    for (date, origin), items in sorted(groups.items()):
-        sequence = [j for _, j in sorted(items, key=lambda x: (x[0], x[1]["appointment"], x[1]["critical"], x[1]["source"]))]
+        manual_order = int(chosen.get("order") or auto[job["key"]]["order"])
+        job_copy = {**job, "manual_order": manual_order}
         if origin == "DIRECTO SIN PREENFRIO":
-            for order, job in enumerate(sequence, 1):
-                dispatch = datetime.combine(job["process_date"].date(), time(START_HOUR))
-                arrival = dispatch + timedelta(hours=job["transit_h"])
-                slack = (job["appointment"] - arrival).total_seconds() / 3600
-                rows.append({**job, "assigned_origin": origin, "assigned_distance_km": None, "order": order, "start": dispatch, "end": dispatch, "arrival": arrival, "slack_h": slack, "status": "CUMPLE" if slack >= 0 else "NO CUMPLE"})
-        else:
-            packed_rows, packed_cycles = pack(origin, sequence)
-            rows.extend(packed_rows)
-            cycles.extend(packed_cycles)
-    return rows, cycles
+            direct.append(job_copy)
+            continue
+        if job["client"] == "SMART":
+            origin = "NELLY"
+        if origin not in allowed(job):
+            origin = auto[job["key"]]["origin"]
+        queues[origin].append(job_copy)
 
+    rows, cycles = [], []
+    for origin in ("NELLY", "FORTALEZA"):
+        # Fecha primero; dentro del mismo dia se respeta el orden manual.
+        queues[origin].sort(key=lambda j: (release_time(j), j.get("manual_order", 9999), j["appointment"], j["critical"], j["source"]))
+        packed_rows, packed_cycles = pack(origin, queues[origin])
+        rows.extend(packed_rows)
+        cycles.extend(packed_cycles)
+
+    for order, job in enumerate(sorted(direct, key=lambda j: (release_time(j), j.get("manual_order", 9999))), 1):
+        dispatch = release_time(job)
+        arrival = dispatch + timedelta(hours=job["transit_h"])
+        slack = (job["appointment"] - arrival).total_seconds() / 3600
+        rows.append({**job, "assigned_origin": "DIRECTO SIN PREENFRIO", "assigned_distance_km": None,
+                     "order": order, "start": dispatch, "end": dispatch, "arrival": arrival,
+                     "slack_h": slack, "status": "CUMPLE" if slack >= 0 else "NO CUMPLE"})
+    return rows, cycles
 
 def serial(rows, cycles):
     def iso(v):
