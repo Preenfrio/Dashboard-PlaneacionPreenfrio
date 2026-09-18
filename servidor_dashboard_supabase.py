@@ -8,13 +8,19 @@ manuales se leen/escriben en Supabase.
 from __future__ import annotations
 
 import io
+import hmac
+import base64
 import json
 import os
+import sys
+import subprocess
 import threading
+import tempfile
 import time as clock
 from datetime import datetime, timedelta, time
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
+from pathlib import Path
 
 import pandas as pd
 from supabase import create_client
@@ -24,6 +30,9 @@ import servidor_dashboard_v2 as core
 HOST = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8010"))
 CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "45"))
+SYNC_TOKEN = os.environ.get("POWER_AUTOMATE_SYNC_TOKEN", "")
+MAX_RETIRED_RATIO = float(os.environ.get("MAX_RETIRED_RATIO", "0.20"))
+IMPORTER = Path(__file__).with_name("importador_incremental_supabase.py")
 
 URL = os.environ.get("SUPABASE_URL")
 KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SECRET_KEY")
@@ -281,6 +290,104 @@ def export_bytes():
     return buffer.getvalue()
 
 
+
+def _summary_from_output(output):
+    start = output.find("{")
+    if start < 0:
+        raise ValueError("El importador no devolvió un resumen JSON")
+    summary, _ = json.JSONDecoder().raw_decode(output[start:])
+    return summary
+
+
+def _run_incremental(excel_path, apply=False):
+    command = [sys.executable, str(IMPORTER), str(excel_path)]
+    if apply:
+        command.append("--aplicar")
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        env=os.environ.copy(),
+    )
+    output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+    if completed.returncode != 0:
+        raise RuntimeError(output.strip() or "El importador terminó con error")
+    return _summary_from_output(output)
+
+
+def synchronise_from_power_automate(body, supplied_token):
+    if not SYNC_TOKEN:
+        return {"ok": False, "aplicado": False, "motivo": "TOKEN_NO_CONFIGURADO"}, 503
+    if not hmac.compare_digest(str(supplied_token or ""), SYNC_TOKEN):
+        return {"ok": False, "aplicado": False, "motivo": "TOKEN_INVALIDO"}, 401
+    if not IMPORTER.is_file():
+        return {"ok": False, "aplicado": False, "motivo": "IMPORTADOR_NO_ENCONTRADO"}, 500
+
+    file_name = str(body.get("nombre_archivo") or "PLANEACION_SEMANAL 1.xlsx")
+    encoded = body.get("contenido_base64")
+    if not encoded:
+        return {"ok": False, "aplicado": False, "motivo": "CONTENIDO_VACIO"}, 400
+    try:
+        binary = base64.b64decode(encoded, validate=True)
+    except Exception:
+        return {"ok": False, "aplicado": False, "motivo": "BASE64_INVALIDO"}, 400
+    if not binary.startswith(b"PK"):
+        return {"ok": False, "aplicado": False, "motivo": "XLSX_INVALIDO"}, 400
+
+    with tempfile.TemporaryDirectory(prefix="planeacion_sync_") as folder:
+        excel_path = Path(folder) / "PLANEACION_SEMANAL 1.xlsx"
+        excel_path.write_bytes(binary)
+        preview = _run_incremental(excel_path, apply=False)
+
+        valid = int(preview.get("filas_validas", 0))
+        new = int(preview.get("nuevos", 0))
+        modified = int(preview.get("modificados", 0))
+        unchanged = int(preview.get("sin_cambios", 0))
+        retired = int(preview.get("retirados", 0))
+        ambiguous = int(preview.get("ambiguos", 0))
+        total_existing = modified + unchanged + retired
+        retired_ratio = retired / total_existing if total_existing else 0.0
+
+        response = {
+            "ok": True,
+            "aplicado": False,
+            "motivo": None,
+            "archivo": file_name,
+            "filas_validas": valid,
+            "filas_rechazadas": int(preview.get("filas_rechazadas", 0)),
+            "nuevos": new,
+            "modificados": modified,
+            "sin_cambios": unchanged,
+            "retirados": retired,
+            "ambiguos": ambiguous,
+            "fecha_sincronizacion": datetime.now().astimezone().isoformat(),
+        }
+        if valid <= 0:
+            response.update(ok=False, motivo="SIN_FILAS_VALIDAS")
+            return response, 422
+        if ambiguous > 0:
+            response["motivo"] = "CONCILIACIONES_AMBIGUAS"
+            return response, 409
+        if retired_ratio > MAX_RETIRED_RATIO:
+            response["motivo"] = "RETIRADOS_SUPERAN_LIMITE"
+            response["proporcion_retirados"] = round(retired_ratio, 6)
+            return response, 409
+        if new + modified + retired == 0:
+            response["motivo"] = "SIN_CAMBIOS"
+            return response, 200
+
+        _run_incremental(excel_path, apply=True)
+        response["aplicado"] = True
+        response["motivo"] = "APLICADO"
+        response["fecha_sincronizacion"] = datetime.now().astimezone().isoformat()
+        with LOCK:
+            CACHE.update(payload=None, time=0.0)
+        return response, 200
+
+
 class Handler(core.H):
     def do_GET(self):
         path = urlparse(self.path).path
@@ -299,6 +406,16 @@ class Handler(core.H):
         path = urlparse(self.path).path
         try:
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if path == "/api/sincronizar-planeacion":
+                body = json.loads(raw or b"{}")
+                result, status = synchronise_from_power_automate(
+                    body, self.headers.get("X-Sync-Token")
+                )
+                return self.sendx(
+                    json.dumps(result, ensure_ascii=False).encode(),
+                    "application/json; charset=utf-8",
+                    status,
+                )
             if path == "/api/replan":
                 body = json.loads(raw or b"{}")
                 save_overrides(body.get("overrides", {}))
