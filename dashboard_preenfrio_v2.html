@@ -493,7 +493,107 @@
             if(TAB==='cycles')renderCycles();
         }
         document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{TAB=b.dataset.tab;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===b));render()});
-        $('refresh').onclick = load;['week', 'dest', 'origin', 'state'].forEach(id => $(id).onchange = render); $('dateBtn').onclick = () => $('multi').classList.toggle('open'); $('allDates').onclick = () => { document.querySelectorAll('.dc').forEach(x => x.checked = true); render() }; $('clearDates').onclick = () => { document.querySelectorAll('.dc').forEach(x => x.checked = false); render() }; $('exportBtn').onclick = () => location.href = '/api/exportar'; $('importBtn').onclick = () => $('importFile').click(); $('importFile').onchange = async e => { const f = e.target.files[0]; if (!f) return; const p = await (await fetch('/api/importar', { method: 'POST', body: await f.arrayBuffer() })).json(); if (!p.ok) alert(p.error); else { OV = {}; applyPayload(p) } }; load();
+
+        /* FILTRO_FECHAS_DINAMICO_V2 */
+        function fechasDisponiblesPorSemana() {
+            const semana = String($('week').value || '');
+            return [...new Set(
+                DATA
+                    .filter(item => !semana || String(item.week) === semana)
+                    .map(item => K(item.process_date))
+            )].sort();
+        }
+
+        function buildDates() {
+            const anteriores = new Set(selectedDates());
+            const disponibles = fechasDisponiblesPorSemana();
+            const anterioresValidas = disponibles.filter(fecha => anteriores.has(fecha));
+
+            // Al cambiar de semana, si ninguna fecha anterior pertenece a la
+            // nueva semana, se seleccionan todas las fechas disponibles.
+            const seleccion = new Set(
+                anterioresValidas.length ? anterioresValidas : disponibles
+            );
+
+            $('dateChecks').innerHTML = disponibles.map(fecha => {
+                const checked = seleccion.has(fecha) ? 'checked' : '';
+                const etiqueta = fecha.split('-').reverse().join('/');
+                return `<label><input class="dc" type="checkbox" value="${fecha}" ${checked}> ${etiqueta}</label>`;
+            }).join('');
+
+            document.querySelectorAll('.dc').forEach(input => {
+                input.onchange = render;
+            });
+
+            updateDateLabel();
+        }
+
+        function applyPayload(p) {
+            DATA = p.data;
+            CYC = p.cycles;
+
+            // Primero se reconstruyen semanas/destinos; después las fechas
+            // se forman usando el valor vigente del filtro Semana.
+            opts('week', DATA.map(item => item.week), 'Semana ');
+            opts('dest', DATA.map(item => item.destination));
+            buildDates();
+
+            $('updated').textContent = 'Última actualización: ' + new Date().toLocaleString('es-MX');
+            render();
+        }
+        $('refresh').onclick = load;
+
+        $('week').onchange = () => {
+            buildDates();
+            render();
+        };
+
+        ['dest', 'origin', 'state'].forEach(id => {
+            $(id).onchange = render;
+        });
+
+        $('dateBtn').onclick = event => {
+            event.stopPropagation();
+            $('multi').classList.toggle('open');
+        };
+
+        $('multi').onclick = event => {
+            event.stopPropagation();
+        };
+
+        document.addEventListener('click', () => {
+            $('multi').classList.remove('open');
+        });
+
+        $('allDates').onclick = () => {
+            document.querySelectorAll('.dc').forEach(input => input.checked = true);
+            render();
+        };
+
+        $('clearDates').onclick = () => {
+            document.querySelectorAll('.dc').forEach(input => input.checked = false);
+            render();
+        };
+
+        $('exportBtn').onclick = () => location.href = '/api/exportar';
+        $('importBtn').onclick = () => $('importFile').click();
+        $('importFile').onchange = async event => {
+            const file = event.target.files[0];
+            if (!file) return;
+            const response = await fetch('/api/importar', {
+                method: 'POST',
+                body: await file.arrayBuffer()
+            });
+            const p = await response.json();
+            if (!p.ok) alert(p.error);
+            else {
+                OV = {};
+                applyPayload(p);
+            }
+        };
+
+        load();
+
     </script>
 </body>
 
