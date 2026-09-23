@@ -255,12 +255,18 @@ def deadline(job):
 
 
 def daily_priority(job, origin):
+    """Orden dentro del mismo dia.
+
+    Si existe orden manual, manda primero para que las flechas realmente reordenen.
+    Sin orden manual, todos reciben 9999 y se conservan las reglas automaticas:
+    cita, criticidad, distancia de finca y orden fuente.
+    """
     distance = job.get("distance_options_km", {}).get(origin)
     return (
+        job.get("manual_order", 9999),
         deadline(job),
         job.get("critical", 99),
         distance if distance is not None else 1_000_000.0,
-        job.get("manual_order", 9999),
         job.get("source", 999999),
     )
 
