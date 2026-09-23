@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
-"""Servidor del Planeador usando Supabase como fuente operativa.
-
-Reutiliza el optimizador de servidor_dashboard_v2.py y conserva el HTML actual.
-Excel se usa solo para CATALOGO y UBICACIONES al arrancar; los procesos y ajustes
-manuales se leen/escriben en Supabase.
-"""
+"""Servidor del Planeador usando Supabase como fuente operativa."""
 from __future__ import annotations
 
-import io
-import hmac
 import base64
+import hmac
+import io
 import json
 import os
-import sys
 import subprocess
-import threading
+import sys
 import tempfile
+import threading
 import time as clock
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer
-from urllib.parse import urlparse
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 from supabase import create_client
@@ -33,7 +28,6 @@ CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "45"))
 SYNC_TOKEN = os.environ.get("POWER_AUTOMATE_SYNC_TOKEN", "")
 MAX_RETIRED_RATIO = float(os.environ.get("MAX_RETIRED_RATIO", "0.20"))
 IMPORTER = Path(__file__).with_name("importador_incremental_supabase.py")
-
 URL = os.environ.get("SUPABASE_URL")
 KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SECRET_KEY")
 if not URL or not KEY:
@@ -62,21 +56,15 @@ def fetch_all(table, select="*", chunk=1000):
 
 
 def load_jobs_and_plan():
-    # procesos_fuente y procesos_planificacion comparten proceso_id, pero no tienen
-    # una FK directa entre sí. Se consultan por separado y se unen en Python.
-    source = fetch_all(
-        "procesos_fuente",
-        "*,procesos!inner(id,activo_fuente)",
-    )
+    source = fetch_all("procesos_fuente", "*,procesos!inner(id,activo_fuente)")
     plan_rows = fetch_all("procesos_planificacion", "*")
     plans = {row["proceso_id"]: row for row in plan_rows}
     jobs = []
-
-    for index, row in enumerate(source, 1):
+    for index, original in enumerate(source, 1):
+        row = dict(original)
         process_meta = row.pop("procesos")
         if not process_meta.get("activo_fuente", True):
             continue
-
         destination = str(row.get("destino") or "").strip()
         info = CATALOGUE.get(core.norm(destination))
         process_date = parse_dt(row.get("fecha_proceso"))
@@ -84,12 +72,11 @@ def load_jobs_and_plan():
         pallets = float(row.get("pallets") or 0)
         if not info or not process_date or not appointment or pallets <= 0:
             continue
-
         farm = str(row.get("finca") or "").strip()
         farm_coord = LOCATIONS.get(core.norm(farm))
         distances = {
-            origin: core.haversine_km(farm_coord, coord)
-            for origin, coord in PRECOOLERS.items()
+            origin: core.haversine_km(farm_coord, coordinate)
+            for origin, coordinate in PRECOOLERS.items()
         }
         process_id = process_meta["id"]
         jobs.append({
@@ -113,24 +100,23 @@ def load_jobs_and_plan():
         })
     return jobs, plans
 
-def fast_automatic(jobs):
-    """Asignador rápido para volumen alto.
 
-    Mantiene la prioridad por disponibilidad, criticidad y cita. Para cada proceso
-    prueba solo las cámaras permitidas, no todas las posiciones posibles de toda
-    la cola, evitando el crecimiento combinatorio del optimizador exhaustivo.
-    """
+def fast_automatic(jobs):
+    """Asignador rápido con colas separadas y restricciones por finca."""
     queues = {"NELLY": [], "FORTALEZA": []}
     assignments = {}
-    ordered = sorted(jobs, key=lambda j: (
-        core.release_time(j), j.get("critical", 99), j["appointment"], j["source"]
+    ordered = sorted(jobs, key=lambda job: (
+        core.release_time(job), job.get("critical", 99), job["appointment"], job["source"]
     ))
     for job in ordered:
+        allowed_origins = core.allowed(job)
+        if not allowed_origins:
+            continue
         best = None
-        for origin in core.allowed(job):
+        for origin in allowed_origins:
             trial = list(queues[origin]) + [job]
-            trial.sort(key=lambda j: (
-                core.release_time(j), j.get("critical", 99), j["appointment"], j["source"]
+            trial.sort(key=lambda queued: (
+                core.release_time(queued), queued.get("critical", 99), queued["appointment"], queued["source"]
             ))
             rows, cycles = core.pack(origin, trial)
             candidate = next(row for row in rows if row["key"] == job["key"])
@@ -142,7 +128,7 @@ def fast_automatic(jobs):
                 max(0.0, -row["slack_h"])
                 for row in rows if row.get("critical", 99) <= 4
             )
-            distance = job["distance_options_km"].get(origin)
+            distance = job.get("distance_options_km", {}).get(origin)
             score = (
                 protected_late,
                 round(protected_delay, 6),
@@ -157,53 +143,94 @@ def fast_automatic(jobs):
             continue
         origin = best[1]
         queues[origin].append(job)
-        same_day = [x for x in queues[origin] if x["process_date"].date() == job["process_date"].date()]
+        same_day = [
+            queued for queued in queues[origin]
+            if queued["process_date"].date() == job["process_date"].date()
+        ]
         assignments[job["key"]] = {"origin": origin, "order": len(same_day)}
     return assignments
 
 
 def calculate():
+    """Calcula dos colas independientes y valida toda asignación manual."""
     jobs, plans = load_jobs_and_plan()
     automatic = fast_automatic(jobs)
     queues = {"NELLY": [], "FORTALEZA": []}
     direct = []
 
     for job in jobs:
-        if job["key"] not in automatic:
+        process_key = job["key"]
+        if process_key not in automatic:
             continue
-        plan = plans.get(job["key"], {})
-        suggested = automatic[job["key"]]
+        plan = plans.get(process_key, {})
+        suggested = automatic[process_key]
         manual_origin = plan.get("preenfrio_manual")
-        kind = plan.get("tipo_asignacion") or "AUTOMATICA"
-        if kind == "DIRECTO_SIN_PREENFRIO":
+        assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
+        allowed_origins = core.allowed(job)
+
+        if assignment_type != "DIRECTO_SIN_PREENFRIO" and not allowed_origins:
+            continue
+
+        if assignment_type == "DIRECTO_SIN_PREENFRIO":
             origin = "DIRECTO SIN PREENFRIO"
         else:
-            origin = manual_origin or suggested["origin"]
-        order = int(plan.get("orden_manual") or suggested["order"])
-        item = {**job, "manual_order": order, "suggested_origin": suggested["origin"], "suggested_order": suggested["order"]}
+            origin = manual_origin or suggested.get("origin")
+            if core.norm(job.get("client", "")) == "SMART":
+                origin = "NELLY"
+            if origin not in allowed_origins:
+                suggested_origin = suggested.get("origin")
+                origin = suggested_origin if suggested_origin in allowed_origins else allowed_origins[0]
+
+        suggested_order = suggested.get("order") or 9999
+        try:
+            order = int(plan.get("orden_manual") or suggested_order)
+        except (TypeError, ValueError):
+            order = int(suggested_order)
+
+        item = {
+            **job,
+            "manual_order": order,
+            "suggested_origin": suggested.get("origin"),
+            "suggested_order": suggested.get("order"),
+        }
+
         if origin == "DIRECTO SIN PREENFRIO":
             direct.append(item)
             continue
-        if job["client"] == "SMART":
-            origin = "NELLY"
-        if origin not in core.allowed(job):
-            origin = suggested["origin"]
+
+        if origin not in allowed_origins:
+            origin = allowed_origins[0]
         queues[origin].append(item)
 
     rows, cycles = [], []
     for origin in ("NELLY", "FORTALEZA"):
-        queues[origin].sort(key=lambda j: (core.release_time(j), j.get("manual_order", 9999), j["critical"], j["appointment"], j["source"]))
+        queues[origin].sort(key=lambda job: (
+            core.release_time(job), job.get("manual_order", 9999),
+            job.get("critical", 99), job["appointment"], job["source"]
+        ))
         packed_rows, packed_cycles = core.pack(origin, queues[origin])
         rows.extend(packed_rows)
         cycles.extend(packed_cycles)
 
-    for order, job in enumerate(sorted(direct, key=lambda j: (core.release_time(j), j.get("manual_order", 9999))), 1):
+    sorted_direct = sorted(direct, key=lambda job: (
+        core.release_time(job), job.get("manual_order", 9999),
+        job.get("critical", 99), job["appointment"], job["source"]
+    ))
+    for order, job in enumerate(sorted_direct, 1):
         dispatch = core.release_time(job)
         arrival = dispatch + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
-        rows.append({**job, "assigned_origin": "DIRECTO SIN PREENFRIO", "assigned_distance_km": None,
-                     "order": order, "start": dispatch, "end": dispatch, "arrival": arrival,
-                     "slack_h": slack, "status": "CUMPLE" if slack >= 0 else "NO CUMPLE"})
+        rows.append({
+            **job,
+            "assigned_origin": "DIRECTO SIN PREENFRIO",
+            "assigned_distance_km": None,
+            "order": order,
+            "start": dispatch,
+            "end": dispatch,
+            "arrival": arrival,
+            "slack_h": slack,
+            "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
+        })
     return rows, cycles, plans
 
 
@@ -212,7 +239,9 @@ def persist_results(rows, cycles):
     for row in rows:
         planning.append({
             "proceso_id": row["key"],
-            "preenfrio_sugerido": row.get("suggested_origin") or (row["assigned_origin"] if row["assigned_origin"] != "DIRECTO SIN PREENFRIO" else None),
+            "preenfrio_sugerido": row.get("suggested_origin") or (
+                row["assigned_origin"] if row["assigned_origin"] != "DIRECTO SIN PREENFRIO" else None
+            ),
             "orden_sugerido": row.get("suggested_order") or row["order"],
             "fecha_ingreso": row["start"].isoformat(timespec="seconds"),
             "fecha_despacho": row["end"].isoformat(timespec="seconds"),
@@ -221,21 +250,26 @@ def persist_results(rows, cycles):
             "holgura_horas": round(row["slack_h"], 6),
             "distancia_km": None if row.get("assigned_distance_km") is None else round(row["assigned_distance_km"], 6),
         })
-    # UPDATE, no UPSERT: evita que columnas manuales ausentes se conviertan en NULL.
     for item in planning:
         process_id = item.pop("proceso_id")
         DB.table("procesos_planificacion").update(item).eq("proceso_id", process_id).execute()
 
-    # Los ciclos son resultados derivados; se regeneran completos para evitar residuos.
     DB.table("ciclos_procesos").delete().neq("ciclo_id", "00000000-0000-0000-0000-000000000000").execute()
     DB.table("ciclos_preenfrio").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
     for cycle in cycles:
         inserted = DB.table("ciclos_preenfrio").insert({
-            "preenfrio": cycle["origin"], "numero_ciclo": cycle["cycle_no"],
-            "inicio": cycle["start"].isoformat(timespec="seconds"), "fin": cycle["end"].isoformat(timespec="seconds"),
-            "capacidad": cycle["capacity"], "tarimas_usadas": cycle["used_pallets"], "tarimas_libres": cycle["free_pallets"],
+            "preenfrio": cycle["origin"],
+            "numero_ciclo": cycle["cycle_no"],
+            "inicio": cycle["start"].isoformat(timespec="seconds"),
+            "fin": cycle["end"].isoformat(timespec="seconds"),
+            "capacidad": cycle["capacity"],
+            "tarimas_usadas": cycle["used_pallets"],
+            "tarimas_libres": cycle["free_pallets"],
         }).execute().data[0]
-        links = [{"ciclo_id": inserted["id"], "proceso_id": load["key"], "tarimas": load["pallets"]} for load in cycle["loads"]]
+        links = [
+            {"ciclo_id": inserted["id"], "proceso_id": load["key"], "tarimas": load["pallets"]}
+            for load in cycle["loads"]
+        ]
         if links:
             DB.table("ciclos_procesos").insert(links).execute()
 
@@ -245,7 +279,12 @@ def serialise(rows, cycles):
         return value.isoformat(timespec="minutes") if isinstance(value, datetime) else value
     row_fields = ["key", "farm", "destination", "client", "process_date", "appointment", "transit_h", "critical", "pallets", "week", "assigned_origin", "assigned_distance_km", "distance_options_km", "location_found", "order", "start", "end", "arrival", "slack_h", "status"]
     cycle_fields = ["cycle_no", "origin", "process_date", "start", "end", "duration_h", "capacity", "used_pallets", "free_pallets", "loads"]
-    return {"ok": True, "source": "SUPABASE", "data": [{f: iso(row[f]) for f in row_fields} for row in rows], "cycles": [{f: iso(cycle[f]) for f in cycle_fields} for cycle in cycles]}
+    return {
+        "ok": True,
+        "source": "SUPABASE",
+        "data": [{field: iso(row[field]) for field in row_fields} for row in rows],
+        "cycles": [{field: iso(cycle[field]) for field in cycle_fields} for cycle in cycles],
+    }
 
 
 def payload(force=False):
@@ -254,8 +293,6 @@ def payload(force=False):
         if not force and CACHE["payload"] is not None and now - CACHE["time"] < CACHE_SECONDS:
             return CACHE["payload"]
         rows, cycles, _ = calculate()
-        # La lectura del dashboard no escribe cientos de filas ni regenera tablas.
-        # Las decisiones manuales se guardan en save_overrides().
         CACHE.update(payload=serialise(rows, cycles), time=now)
         return CACHE["payload"]
 
@@ -265,30 +302,32 @@ def save_overrides(overrides):
     for process_id, change in overrides.items():
         origin = change.get("origin")
         order = change.get("order")
-        values = {"proceso_id": process_id, "orden_manual": int(order) if order else None,
-                  "modificado_por": "DASHBOARD", "modificado_en": now}
+        values = {
+            "proceso_id": process_id,
+            "orden_manual": int(order) if order else None,
+            "modificado_por": "DASHBOARD",
+            "modificado_en": now,
+        }
         if origin == "DIRECTO SIN PREENFRIO":
             values.update(preenfrio_manual=None, tipo_asignacion="DIRECTO_SIN_PREENFRIO")
         elif origin in ("NELLY", "FORTALEZA"):
             values.update(preenfrio_manual=origin, tipo_asignacion="MANUAL")
-        # La fila ya existe desde la importación inicial. UPDATE protege los demás campos.
         process_id_value = values.pop("proceso_id")
         DB.table("procesos_planificacion").update(values).eq("proceso_id", process_id_value).execute()
 
 
 def export_bytes():
-    p = payload()
+    current = payload()
     frame = pd.DataFrame([{
-        "CLAVE": x["key"], "FECHA_PROCESO": x["process_date"][:10], "CLIENTE": x["client"],
-        "FINCA": x["farm"], "DESTINO": x["destination"], "TARIMAS": x["pallets"],
-        "PREENFRIO_ASIGNADO": x["assigned_origin"], "DISTANCIA_KM": x["assigned_distance_km"],
-        "ORDEN": x["order"], "FECHA_CITA": x["appointment"], "FECHA_INGRESO": x["start"],
-        "FECHA_DESPACHO": x["end"], "ESTADO": x["status"],
-    } for x in p["data"]])
+        "CLAVE": item["key"], "FECHA_PROCESO": item["process_date"][:10], "CLIENTE": item["client"],
+        "FINCA": item["farm"], "DESTINO": item["destination"], "TARIMAS": item["pallets"],
+        "PREENFRIO_ASIGNADO": item["assigned_origin"], "DISTANCIA_KM": item["assigned_distance_km"],
+        "ORDEN": item["order"], "FECHA_CITA": item["appointment"], "FECHA_INGRESO": item["start"],
+        "FECHA_DESPACHO": item["end"], "ESTADO": item["status"],
+    } for item in current["data"]])
     buffer = io.BytesIO()
     frame.to_excel(buffer, sheet_name="PLAN_AJUSTADO", index=False, engine="openpyxl")
     return buffer.getvalue()
-
 
 
 def _summary_from_output(output):
@@ -304,13 +343,8 @@ def _run_incremental(excel_path, apply=False):
     if apply:
         command.append("--aplicar")
     completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
-        env=os.environ.copy(),
+        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300, env=os.environ.copy(),
     )
     output = (completed.stdout or "") + "\n" + (completed.stderr or "")
     if completed.returncode != 0:
@@ -325,7 +359,6 @@ def synchronise_from_power_automate(body, supplied_token):
         return {"ok": False, "aplicado": False, "motivo": "TOKEN_INVALIDO"}, 401
     if not IMPORTER.is_file():
         return {"ok": False, "aplicado": False, "motivo": "IMPORTADOR_NO_ENCONTRADO"}, 500
-
     file_name = str(body.get("nombre_archivo") or "PLANEACION_SEMANAL 1.xlsx")
     encoded = body.get("contenido_base64")
     if not encoded:
@@ -341,7 +374,6 @@ def synchronise_from_power_automate(body, supplied_token):
         excel_path = Path(folder) / "PLANEACION_SEMANAL 1.xlsx"
         excel_path.write_bytes(binary)
         preview = _run_incremental(excel_path, apply=False)
-
         valid = int(preview.get("filas_validas", 0))
         new = int(preview.get("nuevos", 0))
         modified = int(preview.get("modificados", 0))
@@ -350,19 +382,11 @@ def synchronise_from_power_automate(body, supplied_token):
         ambiguous = int(preview.get("ambiguos", 0))
         total_existing = modified + unchanged + retired
         retired_ratio = retired / total_existing if total_existing else 0.0
-
         response = {
-            "ok": True,
-            "aplicado": False,
-            "motivo": None,
-            "archivo": file_name,
-            "filas_validas": valid,
-            "filas_rechazadas": int(preview.get("filas_rechazadas", 0)),
-            "nuevos": new,
-            "modificados": modified,
-            "sin_cambios": unchanged,
-            "retirados": retired,
-            "ambiguos": ambiguous,
+            "ok": True, "aplicado": False, "motivo": None, "archivo": file_name,
+            "filas_validas": valid, "filas_rechazadas": int(preview.get("filas_rechazadas", 0)),
+            "nuevos": new, "modificados": modified, "sin_cambios": unchanged,
+            "retirados": retired, "ambiguos": ambiguous,
             "fecha_sincronizacion": datetime.now().astimezone().isoformat(),
         }
         if valid <= 0:
@@ -378,7 +402,6 @@ def synchronise_from_power_automate(body, supplied_token):
         if new + modified + retired == 0:
             response["motivo"] = "SIN_CAMBIOS"
             return response, 200
-
         _run_incremental(excel_path, apply=True)
         response["aplicado"] = True
         response["motivo"] = "APLICADO"
@@ -408,14 +431,8 @@ class Handler(core.H):
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             if path == "/api/sincronizar-planeacion":
                 body = json.loads(raw or b"{}")
-                result, status = synchronise_from_power_automate(
-                    body, self.headers.get("X-Sync-Token")
-                )
-                return self.sendx(
-                    json.dumps(result, ensure_ascii=False).encode(),
-                    "application/json; charset=utf-8",
-                    status,
-                )
+                result, status = synchronise_from_power_automate(body, self.headers.get("X-Sync-Token"))
+                return self.sendx(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8", status)
             if path == "/api/replan":
                 body = json.loads(raw or b"{}")
                 save_overrides(body.get("overrides", {}))

@@ -26,36 +26,36 @@ GAP_MIN = 30
 STATE = {"overrides": {}, "payload": None, "mtime": None}
 
 
-def norm(v):
-    return " ".join(str(v if v is not None else "").strip().upper().split())
+def norm(value):
+    return " ".join(str(value if value is not None else "").strip().upper().split())
 
 
 def col(df, name, required=True):
     wanted = norm(name)
-    for c in df.columns:
-        if norm(c) == wanted:
-            return c
+    for column in df.columns:
+        if norm(column) == wanted:
+            return column
     if required:
         raise ValueError(f"Falta columna: {name}")
     return None
 
 
-def as_dt(v):
-    d = pd.to_datetime(v, dayfirst=True, errors="coerce")
-    return None if pd.isna(d) else d.to_pydatetime()
+def as_dt(value):
+    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    return None if pd.isna(parsed) else parsed.to_pydatetime()
 
 
-def hours(v):
-    if pd.isna(v) or v == "":
+def hours(value):
+    if pd.isna(value) or value == "":
         return 0.0
-    if isinstance(v, (datetime, time)):
-        return v.hour + v.minute / 60 + v.second / 3600
-    if isinstance(v, timedelta):
-        return v.total_seconds() / 3600
-    if isinstance(v, (int, float)):
-        x = float(v)
-        return x * 24 if 0 <= x < 1.5 else x
-    parts = str(v).strip().split(":")
+    if isinstance(value, (datetime, time)):
+        return value.hour + value.minute / 60 + value.second / 3600
+    if isinstance(value, timedelta):
+        return value.total_seconds() / 3600
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number * 24 if 0 <= number < 1.5 else number
+    parts = str(value).strip().split(":")
     try:
         if len(parts) > 1:
             return float(parts[0]) + float(parts[1]) / 60 + (float(parts[2]) / 3600 if len(parts) > 2 else 0)
@@ -65,54 +65,52 @@ def hours(v):
 
 
 def parse_coordinate(value):
-    """Acepta decimal o DMS, por ejemplo 14°59'48.9\"N 92°29'52.8\"W."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
     text = str(value).strip().upper().replace("–", "-").replace("—", "-")
     if not text:
         return None
-    dms = re.findall(r"(\d{1,3})\s*°\s*(\d{1,2})\s*['’]\s*(\d+(?:\.\d+)?)\s*[\"”]?\s*([NSEW])", text)
+    dms = re.findall(r'(\d{1,3})\s*°\s*(\d{1,2})\s*[\'’]\s*(\d+(?:\.\d+)?)\s*[\"”]?\s*([NSEW])', text)
     if len(dms) >= 2:
-        vals = []
-        for deg, minute, second, hemi in dms[:2]:
-            number = float(deg) + float(minute) / 60 + float(second) / 3600
-            if hemi in ("S", "W"):
+        values = []
+        for degree, minute, second, hemisphere in dms[:2]:
+            number = float(degree) + float(minute) / 60 + float(second) / 3600
+            if hemisphere in ("S", "W"):
                 number *= -1
-            vals.append(number)
-        return tuple(vals)
-    nums = re.findall(r"[-+]?\d{1,3}(?:\.\d+)", text)
-    if len(nums) >= 2:
-        lat, lon = float(nums[0]), float(nums[1])
-        # Algunas filas omiten el signo W.
-        if "W" in text and lon > 0:
-            lon *= -1
-        if "S" in text and lat > 0:
-            lat *= -1
-        if -90 <= lat <= 90 and -180 <= lon <= 180:
-            return lat, lon
+            values.append(number)
+        return tuple(values)
+    numbers = re.findall(r"[-+]?\d{1,3}(?:\.\d+)", text)
+    if len(numbers) >= 2:
+        latitude, longitude = float(numbers[0]), float(numbers[1])
+        if "W" in text and longitude > 0:
+            longitude *= -1
+        if "S" in text and latitude > 0:
+            latitude *= -1
+        if -90 <= latitude <= 90 and -180 <= longitude <= 180:
+            return latitude, longitude
     return None
 
 
-def haversine_km(a, b):
-    if not a or not b:
+def haversine_km(point_a, point_b):
+    if not point_a or not point_b:
         return None
-    lat1, lon1 = map(math.radians, a)
-    lat2, lon2 = map(math.radians, b)
+    lat1, lon1 = map(math.radians, point_a)
+    lat2, lon2 = map(math.radians, point_b)
     dlat, dlon = lat2 - lat1, lon2 - lon1
     h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return 6371.0088 * 2 * math.asin(math.sqrt(h))
 
 
 def read_locations():
-    df = pd.read_excel(EXCEL, sheet_name="UBICACIONES", engine="openpyxl")
-    name_col = col(df, "Trazabilidad de finca")
-    coord_col = col(df, "Coordenadas")
+    frame = pd.read_excel(EXCEL, sheet_name="UBICACIONES", engine="openpyxl")
+    name_column = col(frame, "Trazabilidad de finca")
+    coordinate_column = col(frame, "Coordenadas")
     locations = {}
-    for _, row in df.iterrows():
-        name = norm(row[name_col])
-        coord = parse_coordinate(row[coord_col])
-        if name and coord:
-            locations[name] = coord
+    for _, row in frame.iterrows():
+        name = norm(row[name_column])
+        coordinate = parse_coordinate(row[coordinate_column])
+        if name and coordinate:
+            locations[name] = coordinate
     precoolers = {
         "NELLY": locations.get("PREENFRIO NELLY"),
         "FORTALEZA": locations.get("PREENFRIO FORTALEZA"),
@@ -121,25 +119,27 @@ def read_locations():
 
 
 def read_catalogue():
-    df = pd.read_excel(EXCEL, sheet_name="CATALOGO", engine="openpyxl")
-    cols = {n: col(df, n) for n in ["CLIENTE", "DESTINO", "TRÁNSITO (HRS)", "CICLO HORAS FORTALEZA", "CICLO HORAS NELLY", "CRITICIDAD"]}
+    frame = pd.read_excel(EXCEL, sheet_name="CATALOGO", engine="openpyxl")
+    columns = {name: col(frame, name) for name in [
+        "CLIENTE", "DESTINO", "TRÁNSITO (HRS)",
+        "CICLO HORAS FORTALEZA", "CICLO HORAS NELLY", "CRITICIDAD",
+    ]}
     result = {}
-    for _, row in df.iterrows():
-        destination = norm(row[cols["DESTINO"]])
+    for _, row in frame.iterrows():
+        destination = norm(row[columns["DESTINO"]])
         if not destination:
             continue
-        critical_raw = row[cols["CRITICIDAD"]]
         try:
-            critical = int(float(critical_raw))
+            critical = int(float(row[columns["CRITICIDAD"]]))
         except (TypeError, ValueError):
             critical = 99
         result[destination] = {
-            "client": norm(row[cols["CLIENTE"]]),
-            "transit_h": hours(row[cols["TRÁNSITO (HRS)"]]),
+            "client": norm(row[columns["CLIENTE"]]),
+            "transit_h": hours(row[columns["TRÁNSITO (HRS)"]]),
             "critical": critical,
             "cycle": {
-                "NELLY": hours(row[cols["CICLO HORAS NELLY"]]),
-                "FORTALEZA": hours(row[cols["CICLO HORAS FORTALEZA"]]),
+                "NELLY": hours(row[columns["CICLO HORAS NELLY"]]),
+                "FORTALEZA": hours(row[columns["CICLO HORAS FORTALEZA"]]),
             },
         }
     return result
@@ -148,43 +148,43 @@ def read_catalogue():
 def read_jobs():
     catalogue = read_catalogue()
     locations, precoolers = read_locations()
-    df = pd.read_excel(EXCEL, sheet_name="PLANEACION", engine="openpyxl")
-    cols = {n: col(df, n) for n in ["Finca", "Destino", "Pallets", "Fecha de proceso", "FECHA CITA"]}
-    cols["SEMANA"] = col(df, "SEMANA", False)
-    cols["HORAS TRANSITO"] = col(df, "HORAS TRANSITO", False)
-    cols["NIVEL CRITICO"] = col(df, "NIVEL CRITICO", False)
+    frame = pd.read_excel(EXCEL, sheet_name="PLANEACION", engine="openpyxl")
+    columns = {name: col(frame, name) for name in ["Finca", "Destino", "Pallets", "Fecha de proceso", "FECHA CITA"]}
+    columns["SEMANA"] = col(frame, "SEMANA", False)
+    columns["HORAS TRANSITO"] = col(frame, "HORAS TRANSITO", False)
+    columns["NIVEL CRITICO"] = col(frame, "NIVEL CRITICO", False)
     jobs = {}
-    for i, row in df.iterrows():
-        farm = str(row[cols["Finca"]]).strip()
-        destination = str(row[cols["Destino"]]).strip()
+    for index, row in frame.iterrows():
+        farm = str(row[columns["Finca"]]).strip()
+        destination = str(row[columns["Destino"]]).strip()
         info = catalogue.get(norm(destination))
-        process_date = as_dt(row[cols["Fecha de proceso"]])
-        appointment = as_dt(row[cols["FECHA CITA"]])
+        process_date = as_dt(row[columns["Fecha de proceso"]])
+        appointment = as_dt(row[columns["FECHA CITA"]])
         try:
-            pallets = float(row[cols["Pallets"]])
+            pallets = float(row[columns["Pallets"]])
         except (TypeError, ValueError):
             pallets = 0
         if not info or not process_date or not appointment or pallets <= 0:
             continue
-        transit_h = hours(row[cols["HORAS TRANSITO"]]) if cols["HORAS TRANSITO"] else info["transit_h"]
+        transit_h = hours(row[columns["HORAS TRANSITO"]]) if columns["HORAS TRANSITO"] else info["transit_h"]
         try:
-            critical = int(float(row[cols["NIVEL CRITICO"]])) if cols["NIVEL CRITICO"] else info["critical"]
+            critical = int(float(row[columns["NIVEL CRITICO"]])) if columns["NIVEL CRITICO"] else info["critical"]
         except (TypeError, ValueError):
             critical = info["critical"]
         try:
-            week = str(int(float(row[cols["SEMANA"]]))) if cols["SEMANA"] else str(process_date.isocalendar().week)
+            week = str(int(float(row[columns["SEMANA"]]))) if columns["SEMANA"] else str(process_date.isocalendar().week)
         except (TypeError, ValueError):
             week = str(process_date.isocalendar().week)
-        farm_coord = locations.get(norm(farm))
-        distances = {origin: haversine_km(farm_coord, coord) for origin, coord in precoolers.items()}
+        farm_coordinate = locations.get(norm(farm))
+        distances = {origin: haversine_km(farm_coordinate, coordinate) for origin, coordinate in precoolers.items()}
         key = f"{norm(farm)}|{norm(destination)}|{process_date.date()}|{appointment.date()}|{info['client']}"
         if key not in jobs:
             jobs[key] = {
-                "key": key, "source": i + 2, "farm": farm, "destination": destination,
+                "key": key, "source": index + 2, "farm": farm, "destination": destination,
                 "client": info["client"], "process_date": process_date.replace(hour=0, minute=0, second=0, microsecond=0),
                 "appointment": appointment, "transit_h": transit_h, "critical": critical,
                 "pallets": pallets, "week": week, "cycle_options": info["cycle"],
-                "distance_options_km": distances, "location_found": farm_coord is not None,
+                "distance_options_km": distances, "location_found": farm_coordinate is not None,
             }
         else:
             jobs[key]["pallets"] += pallets
@@ -192,59 +192,76 @@ def read_jobs():
 
 
 def allowed(job):
-    if job["client"] == "SMART":
-        return ["NELLY"] if job["cycle_options"]["NELLY"] > 0 else []
-    return [o for o in ("NELLY", "FORTALEZA") if job["cycle_options"][o] > 0]
+    """Cámaras permitidas, respetando la separación física Nelly/Fortaleza."""
+    farm = norm(job.get("farm", ""))
+    client = norm(job.get("client", ""))
+    cycle_options = job.get("cycle_options") or {}
+    nelly_enabled = hours(cycle_options.get("NELLY", 0)) > 0
+    fortaleza_enabled = hours(cycle_options.get("FORTALEZA", 0)) > 0
+
+    is_nelly_farm = farm.startswith("A01 003") or "DOÑA NELLY" in farm or "DONA NELLY" in farm
+    if is_nelly_farm:
+        return ["NELLY"] if nelly_enabled else []
+
+    is_fortaleza_farm = farm.startswith("A01 002") or farm == "FORTALEZA" or "A01 002 FORTALEZA" in farm
+    if is_fortaleza_farm:
+        return ["FORTALEZA"] if fortaleza_enabled else []
+
+    if client == "SMART":
+        return ["NELLY"] if nelly_enabled else []
+
+    result = []
+    if nelly_enabled:
+        result.append("NELLY")
+    if fortaleza_enabled:
+        result.append("FORTALEZA")
+    return result
 
 
 def release_time(job):
-    """Hora en que la fruta queda disponible para entrar a preenfrio."""
     return datetime.combine(job["process_date"].date(), time(START_HOUR))
 
 
 def pack(origin, sequence):
-    """Construye una sola cola cronologica por preenfrio, sin reiniciar por dia."""
+    """Construye una cola cronológica independiente para una sola cámara."""
     if not sequence:
         return [], []
     capacity = CAP[origin]
-    sequence = sorted(sequence, key=lambda j: (release_time(j), j.get("manual_order", 9999), j["critical"], j["appointment"], j["source"]))
-    remaining = {j["key"]: j["pallets"] for j in sequence}
+    sequence = sorted(sequence, key=lambda job: (
+        release_time(job), job.get("manual_order", 9999), job.get("critical", 99), job["appointment"], job["source"]
+    ))
+    remaining = {job["key"]: job["pallets"] for job in sequence}
     first, last, cycles = {}, {}, []
     pending = list(sequence)
-    current = min(release_time(j) for j in pending)
-
+    current = min(release_time(job) for job in pending)
     while pending:
-        available = [j for j in pending if release_time(j) <= current]
+        available = [job for job in pending if release_time(job) <= current]
         if not available:
-            current = min(release_time(j) for j in pending)
-            available = [j for j in pending if release_time(j) <= current]
-        available.sort(key=lambda j: (j.get("manual_order", 9999), j["critical"], j["appointment"], j["source"]))
-
+            current = min(release_time(job) for job in pending)
+            available = [job for job in pending if release_time(job) <= current]
+        available.sort(key=lambda job: (
+            job.get("manual_order", 9999), job.get("critical", 99), job["appointment"], job["source"]
+        ))
         space, loads, duration = capacity, [], 0.0
         for job in available:
             if space <= 1e-9:
                 break
-            qty = min(space, remaining[job["key"]])
-            if qty <= 1e-9:
+            quantity = min(space, remaining[job["key"]])
+            if quantity <= 1e-9:
                 continue
-            loads.append({"key": job["key"], "destination": job["destination"], "farm": job.get("farm", ""), "pallets": qty})
-            duration = max(duration, job["cycle_options"][origin])
+            loads.append({"key": job["key"], "destination": job["destination"], "farm": job.get("farm", ""), "pallets": quantity})
+            duration = max(duration, hours(job["cycle_options"].get(origin, 0)))
             first.setdefault(job["key"], current)
-            remaining[job["key"]] -= qty
-            space -= qty
-
+            remaining[job["key"]] -= quantity
+            space -= quantity
+        if not loads:
+            raise ValueError(f"No se pudo formar un ciclo válido para {origin}")
         end = current + timedelta(hours=duration)
         cycles.append({
-            "cycle_no": len(cycles) + 1,
-            "origin": origin,
+            "cycle_no": len(cycles) + 1, "origin": origin,
             "process_date": current.replace(hour=0, minute=0, second=0, microsecond=0),
-            "start": current,
-            "end": end,
-            "duration_h": duration,
-            "capacity": capacity,
-            "used_pallets": capacity - space,
-            "free_pallets": space,
-            "loads": loads,
+            "start": current, "end": end, "duration_h": duration, "capacity": capacity,
+            "used_pallets": capacity - space, "free_pallets": space, "loads": loads,
         })
         completed = []
         for load in loads:
@@ -252,200 +269,79 @@ def pack(origin, sequence):
             if remaining[key] <= 1e-9:
                 last[key] = end
                 completed.append(key)
-        pending = [j for j in pending if j["key"] not in completed]
+        pending = [job for job in pending if job["key"] not in completed]
         current = end + timedelta(minutes=GAP_MIN)
 
-    rows = []
-    order_by_day = {}
+    rows, counters = [], {}
     for job in sequence:
         end = last[job["key"]]
         arrival = end + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
         day_key = (job["process_date"].date(), origin)
-        order_by_day[day_key] = order_by_day.get(day_key, 0) + 1
+        counters[day_key] = counters.get(day_key, 0) + 1
         rows.append({
-            **job,
-            "assigned_origin": origin,
+            **job, "assigned_origin": origin,
             "assigned_distance_km": job["distance_options_km"].get(origin),
-            "order": order_by_day[day_key],
-            "start": first[job["key"]],
-            "end": end,
-            "arrival": arrival,
-            "slack_h": slack,
+            "order": counters[day_key], "start": first[job["key"]], "end": end,
+            "arrival": arrival, "slack_h": slack,
             "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
         })
     return rows, cycles
 
 
-def _plan_from_queues(queues):
-    rows, cycles = [], []
-    for origin in ("NELLY", "FORTALEZA"):
-        r, c = pack(origin, queues[origin])
-        rows.extend(r)
-        cycles.extend(c)
-    return rows, cycles
-
-
-def _plan_score(queues):
-    """Puntuacion lexicografica: primero se protege la criticidad mas alta.
-
-    Para cada nivel, empezando por 1, se compara:
-      1) cantidad de incumplimientos;
-      2) horas de retraso acumuladas.
-    Solo despues se consideran el total, distancia y numero de ciclos.
-    """
-    rows, cycles = _plan_from_queues(queues)
-    levels = sorted({max(1, int(r.get("critical", 99))) for r in rows})
-    # Incluye 1..9 aunque algun nivel no aparezca, para que el criterio sea estable.
-    levels = sorted(set(range(1, 10)) | set(levels))
-    score = []
-    for level in levels:
-        same = [r for r in rows if max(1, int(r.get("critical", 99))) == level]
-        score.extend([
-            sum(r["status"] == "NO CUMPLE" for r in same),
-            round(sum(max(0.0, -r["slack_h"]) for r in same), 6),
-        ])
-    score.extend([
-        sum(r["status"] == "NO CUMPLE" for r in rows),
-        round(sum(max(0.0, -r["slack_h"]) for r in rows), 6),
-        round(sum((r.get("assigned_distance_km") or 0.0) for r in rows), 6),
-        len(cycles),
-    ])
-    return tuple(score)
-
-
-def _normalise_queues(queues):
-    """Mantiene disponibilidad por fecha; dentro del dia prioriza criticidad/cita."""
-    out = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
-    for origin in out:
-        out[origin].sort(key=lambda j: (
-            release_time(j),
-            j.get("critical", 99),
-            j.get("appointment"),
-            j.get("source", 999999),
-        ))
-    return out
-
-
 def automatic(jobs):
-    """Optimiza asignacion y secuencia protegiendo criticidad y citas.
-
-    No pone ciegamente todo nivel 1 antes: evalua el resultado final. Si dar paso
-    a otro proceso permite cumplir ambos sin perjudicar niveles superiores, lo usa.
-    Si hay conflicto inevitable, evita primero incumplir nivel 1, luego 2, etc.
-    """
-    ordered = sorted(jobs, key=lambda j: (
-        release_time(j), j.get("critical", 99), j["appointment"], j["source"]
-    ))
     queues = {"NELLY": [], "FORTALEZA": []}
-
-    # Construccion inicial: para cada proceso prueba todas las camaras permitidas
-    # y posiciones factibles dentro del mismo dia.
+    assignments = {}
+    ordered = sorted(jobs, key=lambda job: (release_time(job), job.get("critical", 99), job["appointment"], job["source"]))
     for job in ordered:
         best = None
         for origin in allowed(job):
-            base = list(queues[origin])
-            same_day_positions = [i for i in range(len(base) + 1)
-                                  if i == len(base) or base[i]["process_date"].date() >= job["process_date"].date()]
-            for pos in same_day_positions:
-                trial = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
-                trial[origin].insert(pos, job)
-                # Nunca adelantar fruta antes de su disponibilidad; pack() tambien lo valida.
-                score = _plan_score(trial)
-                tie = (score, origin != "NELLY", pos)
-                if best is None or tie < best[0]:
-                    best = (tie, trial)
-        if best is not None:
-            queues = best[1]
-
-    # Mejora local: intercambios adyacentes y cambios de camara hasta estabilizar.
-    queues = _normalise_queues(queues)
-    best_score = _plan_score(queues)
-    improved = True
-    passes = 0
-    while improved and passes < 12:
-        improved = False
-        passes += 1
-
-        # 1) Intercambios dentro de la misma camara y misma fecha de proceso.
-        for origin in ("NELLY", "FORTALEZA"):
-            for i in range(len(queues[origin]) - 1):
-                a, b = queues[origin][i], queues[origin][i + 1]
-                if a["process_date"].date() != b["process_date"].date():
-                    continue
-                trial = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
-                trial[origin][i], trial[origin][i + 1] = trial[origin][i + 1], trial[origin][i]
-                score = _plan_score(trial)
-                if score < best_score:
-                    queues, best_score, improved = trial, score, True
-                    break
-            if improved:
-                break
-        if improved:
+            trial = list(queues[origin]) + [job]
+            rows, cycles = pack(origin, trial)
+            candidate = next(row for row in rows if row["key"] == job["key"])
+            score = (
+                0 if candidate["status"] == "CUMPLE" else 1,
+                max(0.0, -candidate["slack_h"]),
+                job["distance_options_km"].get(origin) if job["distance_options_km"].get(origin) is not None else 1000000.0,
+                len(cycles),
+            )
+            if best is None or score < best[0]:
+                best = (score, origin)
+        if best is None:
             continue
-
-        # 2) Mover procesos no SMART a la otra camara y probar posiciones del mismo dia.
-        for origin in ("NELLY", "FORTALEZA"):
-            other = "FORTALEZA" if origin == "NELLY" else "NELLY"
-            for i, job in enumerate(list(queues[origin])):
-                if other not in allowed(job):
-                    continue
-                reduced = {"NELLY": list(queues["NELLY"]), "FORTALEZA": list(queues["FORTALEZA"])}
-                reduced[origin].pop(i)
-                for pos in range(len(reduced[other]) + 1):
-                    trial = {"NELLY": list(reduced["NELLY"]), "FORTALEZA": list(reduced["FORTALEZA"])}
-                    trial[other].insert(pos, job)
-                    score = _plan_score(trial)
-                    if score < best_score:
-                        queues, best_score, improved = trial, score, True
-                        break
-                if improved:
-                    break
-            if improved:
-                break
-
-    # Orden que recibe recalc(). Se numera por dia/camara para conservar las flechas.
-    assignments = {}
-    for origin in ("NELLY", "FORTALEZA"):
-        counters = {}
-        for job in queues[origin]:
-            day = job["process_date"].date()
-            counters[day] = counters.get(day, 0) + 1
-            assignments[job["key"]] = {"origin": origin, "order": counters[day]}
+        origin = best[1]
+        queues[origin].append(job)
+        same_day = [item for item in queues[origin] if item["process_date"].date() == job["process_date"].date()]
+        assignments[job["key"]] = {"origin": origin, "order": len(same_day)}
     return assignments
+
 
 def recalc(overrides=None):
     jobs = read_jobs()
     auto = automatic(jobs)
-    ov = overrides if overrides is not None else STATE["overrides"]
+    selected_overrides = overrides if overrides is not None else STATE["overrides"]
     queues = {"NELLY": [], "FORTALEZA": []}
     direct = []
-
     for job in jobs:
         if job["key"] not in auto:
             continue
-        chosen = ov.get(job["key"], auto[job["key"]])
+        chosen = selected_overrides.get(job["key"], auto[job["key"]])
         origin = chosen.get("origin") or auto[job["key"]]["origin"]
         manual_order = int(chosen.get("order") or auto[job["key"]]["order"])
         job_copy = {**job, "manual_order": manual_order}
         if origin == "DIRECTO SIN PREENFRIO":
             direct.append(job_copy)
             continue
-        if job["client"] == "SMART":
-            origin = "NELLY"
-        if origin not in allowed(job):
-            origin = auto[job["key"]]["origin"]
+        permitted = allowed(job)
+        if origin not in permitted:
+            origin = auto[job["key"]]["origin"] if auto[job["key"]]["origin"] in permitted else permitted[0]
         queues[origin].append(job_copy)
-
     rows, cycles = [], []
     for origin in ("NELLY", "FORTALEZA"):
-        # Fecha primero; dentro del mismo dia se respeta el orden manual.
-        queues[origin].sort(key=lambda j: (release_time(j), j.get("manual_order", 9999), j["appointment"], j["critical"], j["source"]))
         packed_rows, packed_cycles = pack(origin, queues[origin])
         rows.extend(packed_rows)
         cycles.extend(packed_cycles)
-
-    for order, job in enumerate(sorted(direct, key=lambda j: (release_time(j), j.get("manual_order", 9999))), 1):
+    for order, job in enumerate(sorted(direct, key=lambda item: (release_time(item), item.get("manual_order", 9999))), 1):
         dispatch = release_time(job)
         arrival = dispatch + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
@@ -454,12 +350,16 @@ def recalc(overrides=None):
                      "slack_h": slack, "status": "CUMPLE" if slack >= 0 else "NO CUMPLE"})
     return rows, cycles
 
+
 def serial(rows, cycles):
-    def iso(v):
-        return v.isoformat(timespec="minutes") if isinstance(v, datetime) else v
+    def iso(value):
+        return value.isoformat(timespec="minutes") if isinstance(value, datetime) else value
     row_fields = ["key", "farm", "destination", "client", "process_date", "appointment", "transit_h", "critical", "pallets", "week", "assigned_origin", "assigned_distance_km", "distance_options_km", "location_found", "order", "start", "end", "arrival", "slack_h", "status"]
     cycle_fields = ["cycle_no", "origin", "process_date", "start", "end", "duration_h", "capacity", "used_pallets", "free_pallets", "loads"]
-    return {"ok": True, "version": "2.3", "excel": EXCEL.name, "modified": datetime.fromtimestamp(EXCEL.stat().st_mtime).isoformat(timespec="seconds"), "data": [{f: iso(x[f]) for f in row_fields} for x in rows], "cycles": [{f: iso(x[f]) for f in cycle_fields} for x in cycles]}
+    return {"ok": True, "version": "2.4", "excel": EXCEL.name,
+            "modified": datetime.fromtimestamp(EXCEL.stat().st_mtime).isoformat(timespec="seconds"),
+            "data": [{field: iso(row[field]) for field in row_fields} for row in rows],
+            "cycles": [{field: iso(cycle[field]) for field in cycle_fields} for cycle in cycles]}
 
 
 def payload():
@@ -472,21 +372,30 @@ def payload():
 
 
 def export_bytes():
-    p = payload()
-    df = pd.DataFrame([{"CLAVE": x["key"], "FECHA_PROCESO": x["process_date"][:10], "CLIENTE": x["client"], "FINCA": x["farm"], "DESTINO": x["destination"], "TARIMAS": x["pallets"], "PREENFRIO_ASIGNADO": x["assigned_origin"], "DISTANCIA_KM": x["assigned_distance_km"], "ORDEN": x["order"], "FECHA_CITA": x["appointment"][:10], "FECHA_INGRESO": x["start"], "FECHA_DESPACHO": x["end"], "ESTADO": x["status"]} for x in p["data"]])
+    current = payload()
+    frame = pd.DataFrame([{
+        "CLAVE": item["key"], "FECHA_PROCESO": item["process_date"][:10], "CLIENTE": item["client"],
+        "FINCA": item["farm"], "DESTINO": item["destination"], "TARIMAS": item["pallets"],
+        "PREENFRIO_ASIGNADO": item["assigned_origin"], "DISTANCIA_KM": item["assigned_distance_km"],
+        "ORDEN": item["order"], "FECHA_CITA": item["appointment"][:10], "FECHA_INGRESO": item["start"],
+        "FECHA_DESPACHO": item["end"], "ESTADO": item["status"],
+    } for item in current["data"]])
     buffer = io.BytesIO()
-    df.to_excel(buffer, sheet_name="PLAN_AJUSTADO", index=False, engine="openpyxl")
+    frame.to_excel(buffer, sheet_name="PLAN_AJUSTADO", index=False, engine="openpyxl")
     return buffer.getvalue()
 
 
 def import_overrides(raw):
-    df = pd.read_excel(io.BytesIO(raw), sheet_name="PLAN_AJUSTADO", engine="openpyxl")
-    cols = {n: col(df, n) for n in ["CLAVE", "PREENFRIO_ASIGNADO", "ORDEN"]}
-    ov = {}
-    for _, row in df.iterrows():
-        ov[str(row[cols["CLAVE"]]).strip()] = {"origin": norm(row[cols["PREENFRIO_ASIGNADO"]]), "order": int(float(row[cols["ORDEN"]]))}
-    STATE["overrides"] = ov
-    STATE["payload"] = serial(*recalc(ov))
+    frame = pd.read_excel(io.BytesIO(raw), sheet_name="PLAN_AJUSTADO", engine="openpyxl")
+    columns = {name: col(frame, name) for name in ["CLAVE", "PREENFRIO_ASIGNADO", "ORDEN"]}
+    overrides = {}
+    for _, row in frame.iterrows():
+        overrides[str(row[columns["CLAVE"]]).strip()] = {
+            "origin": norm(row[columns["PREENFRIO_ASIGNADO"]]),
+            "order": int(float(row[columns["ORDEN"]])),
+        }
+    STATE["overrides"] = overrides
+    STATE["payload"] = serial(*recalc(overrides))
     return STATE["payload"]
 
 
@@ -508,8 +417,8 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/datos":
             try:
                 return self.sendx(json.dumps(payload(), ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            except Exception as e:
-                return self.sendx(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 500)
+            except Exception as exc:
+                return self.sendx(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 500)
         if path == "/api/exportar":
             return self.sendx(export_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", extra={"Content-Disposition": 'attachment; filename="PLAN_AJUSTADO_V2.xlsx"'})
         return self.sendx(b"No encontrado", code=404)
@@ -526,8 +435,8 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/importar":
                 result = import_overrides(raw)
                 return self.sendx(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-        except Exception as e:
-            return self.sendx(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 500)
+        except Exception as exc:
+            return self.sendx(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 500)
         return self.sendx(b"No encontrado", code=404)
 
     def log_message(self, *_):
@@ -535,7 +444,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Planeador V2.3: http://{HOST}:{PORT}")
+    print(f"Planeador V2.4: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), H)
     if HOST == "127.0.0.1":
         threading.Timer(0.6, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
