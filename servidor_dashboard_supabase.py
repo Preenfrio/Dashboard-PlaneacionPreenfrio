@@ -1,456 +1,142 @@
 #!/usr/bin/env python3
-"""Servidor del Planeador usando Supabase como fuente operativa."""
+"""Planeador Supabase con programación FIFO diaria y preenfrío parcial inmediato."""
 from __future__ import annotations
-
-import base64
-import hmac
-import io
-import json
-import os
-import subprocess
-import sys
-import tempfile
-import threading
-import time as clock
-from datetime import datetime, timedelta
+import io,json,os,threading,time as clock
+from datetime import datetime,timedelta
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlparse
-
 import pandas as pd
 from supabase import create_client
-
 import servidor_dashboard_v2 as core
 
-HOST = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
-PORT = int(os.environ.get("PORT", "8010"))
-CACHE_SECONDS = int(os.environ.get("CACHE_SECONDS", "45"))
-SYNC_TOKEN = os.environ.get("POWER_AUTOMATE_SYNC_TOKEN", "")
-MAX_RETIRED_RATIO = float(os.environ.get("MAX_RETIRED_RATIO", "0.20"))
-IMPORTER = Path(__file__).with_name("importador_incremental_supabase.py")
-URL = os.environ.get("SUPABASE_URL")
-KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SECRET_KEY")
-if not URL or not KEY:
-    raise RuntimeError("Faltan SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY")
+HOST="0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
+PORT=int(os.environ.get("PORT","8010")); CACHE_SECONDS=int(os.environ.get("CACHE_SECONDS","45"))
+URL=os.environ.get("SUPABASE_URL"); KEY=os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SECRET_KEY")
+if not URL or not KEY: raise RuntimeError("Faltan SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY")
+DB=create_client(URL,KEY); LOCK=threading.RLock(); CACHE={"payload":None,"time":0.0}
+CATALOGUE=core.read_catalogue(); LOCATIONS,PRECOOLERS=core.read_locations()
 
-DB = create_client(URL, KEY)
-LOCK = threading.RLock()
-CACHE = {"payload": None, "time": 0.0}
-CATALOGUE = core.read_catalogue()
-LOCATIONS, PRECOOLERS = core.read_locations()
+def parse_dt(v):
+    d=pd.to_datetime(v,errors="coerce"); return None if pd.isna(d) else d.to_pydatetime()
 
-
-def parse_dt(value):
-    parsed = pd.to_datetime(value, errors="coerce")
-    return None if pd.isna(parsed) else parsed.to_pydatetime()
-
-
-def fetch_all(table, select="*", chunk=1000):
-    rows, start = [], 0
+def fetch_all(table,select="*",chunk=1000):
+    rows=[]; start=0
     while True:
-        data = DB.table(table).select(select).range(start, start + chunk - 1).execute().data
-        rows.extend(data)
-        if len(data) < chunk:
-            return rows
-        start += chunk
-
+        data=DB.table(table).select(select).range(start,start+chunk-1).execute().data; rows.extend(data)
+        if len(data)<chunk: return rows
+        start+=chunk
 
 def load_jobs_and_plan():
-    source = fetch_all("procesos_fuente", "*,procesos!inner(id,activo_fuente)")
-    plan_rows = fetch_all("procesos_planificacion", "*")
-    plans = {row["proceso_id"]: row for row in plan_rows}
-    jobs = []
-    for index, original in enumerate(source, 1):
-        row = dict(original)
-        process_meta = row.pop("procesos")
-        if not process_meta.get("activo_fuente", True):
-            continue
-        destination = str(row.get("destino") or "").strip()
-        info = CATALOGUE.get(core.norm(destination))
-        process_date = parse_dt(row.get("fecha_proceso"))
-        appointment = parse_dt(row.get("fecha_cita"))
-        pallets = float(row.get("pallets") or 0)
-        if not info or not process_date or not appointment or pallets <= 0:
-            continue
-        farm = str(row.get("finca") or "").strip()
-        farm_coord = LOCATIONS.get(core.norm(farm))
-        distances = {
-            origin: core.haversine_km(farm_coord, coordinate)
-            for origin, coordinate in PRECOOLERS.items()
-        }
-        process_id = process_meta["id"]
-        jobs.append({
-            "key": process_id,
-            "source": index,
-            "farm": farm,
-            "destination": destination,
-            "client": core.norm(row.get("cliente") or info["client"]),
-            "process_date": process_date.replace(hour=0, minute=0, second=0, microsecond=0),
-            "appointment": appointment,
-            "transit_h": float(row.get("horas_transito") if row.get("horas_transito") is not None else info["transit_h"]),
-            "critical": int(row.get("nivel_critico") if row.get("nivel_critico") is not None else info["critical"]),
-            "pallets": pallets,
-            "week": str(row.get("semana") or process_date.isocalendar().week),
-            "cycle_options": info["cycle"],
-            "distance_options_km": distances,
-            "location_found": farm_coord is not None,
-            "ov": row.get("ov"),
-            "sku": row.get("sku"),
-            "lote": row.get("lote"),
-        })
-    return jobs, plans
-
+    source=fetch_all("procesos_fuente","*,procesos!inner(id,activo_fuente)"); plan_rows=fetch_all("procesos_planificacion","*")
+    plans={r["proceso_id"]:r for r in plan_rows}; jobs=[]
+    for index,original in enumerate(source,1):
+        row=dict(original); meta=row.pop("procesos")
+        if not meta.get("activo_fuente",True): continue
+        destination=str(row.get("destino") or "").strip(); info=CATALOGUE.get(core.norm(destination))
+        process_date,appointment=parse_dt(row.get("fecha_proceso")),parse_dt(row.get("fecha_cita"))
+        try: pallets=float(row.get("pallets") or 0)
+        except (TypeError,ValueError): pallets=0
+        if not info or not process_date or not appointment or pallets<=0: continue
+        farm=str(row.get("finca") or "").strip(); coord=LOCATIONS.get(core.norm(farm))
+        distances={o:core.haversine_km(coord,p) for o,p in PRECOOLERS.items()}
+        jobs.append({"key":meta["id"],"source":index,"farm":farm,"destination":destination,
+                     "client":core.norm(row.get("cliente") or info["client"]),
+                     "process_date":process_date.replace(hour=0,minute=0,second=0,microsecond=0),"appointment":appointment,
+                     "transit_h":float(row.get("horas_transito") if row.get("horas_transito") is not None else info["transit_h"]),
+                     "critical":int(row.get("nivel_critico") if row.get("nivel_critico") is not None else info["critical"]),
+                     "pallets":pallets,"week":str(row.get("semana") or process_date.isocalendar().week),
+                     "cycle_options":info["cycle"],"distance_options_km":distances,"location_found":coord is not None,
+                     "ov":row.get("ov"),"sku":row.get("sku"),"lote":row.get("lote")})
+    return jobs,plans
 
 def fast_automatic(jobs):
-    """Asignador rápido con colas separadas y restricciones por finca."""
-    queues = {"NELLY": [], "FORTALEZA": []}
-    assignments = {}
-    ordered = sorted(jobs, key=lambda job: (
-        core.release_time(job), job.get("critical", 99), job["appointment"], job["source"]
-    ))
+    queues={"NELLY":[],"FORTALEZA":[]}; assignments={}
+    ordered=sorted(jobs,key=lambda j:(core.release_time(j),core.deadline(j),j.get("critical",99),j["source"]))
     for job in ordered:
-        allowed_origins = core.allowed(job)
-        if not allowed_origins:
-            continue
-        best = None
-        for origin in allowed_origins:
-            trial = list(queues[origin]) + [job]
-            trial.sort(key=lambda queued: (
-                core.release_time(queued), queued.get("critical", 99), queued["appointment"], queued["source"]
-            ))
-            rows, cycles = core.pack(origin, trial)
-            candidate = next(row for row in rows if row["key"] == job["key"])
-            protected_late = sum(
-                row["status"] == "NO CUMPLE" and row.get("critical", 99) <= 4
-                for row in rows
-            )
-            protected_delay = sum(
-                max(0.0, -row["slack_h"])
-                for row in rows if row.get("critical", 99) <= 4
-            )
-            distance = job.get("distance_options_km", {}).get(origin)
-            score = (
-                protected_late,
-                round(protected_delay, 6),
-                0 if candidate["status"] == "CUMPLE" else 1,
-                max(0.0, -candidate["slack_h"]),
-                distance if distance is not None else 1000000.0,
-                len(cycles),
-            )
-            if best is None or score < best[0]:
-                best = (score, origin)
-        if best is None:
-            continue
-        origin = best[1]
-        queues[origin].append(job)
-        same_day = [
-            queued for queued in queues[origin]
-            if queued["process_date"].date() == job["process_date"].date()
-        ]
-        assignments[job["key"]] = {"origin": origin, "order": len(same_day)}
+        best=None
+        for origin in core.allowed(job):
+            rows,cycles=core.pack(origin,queues[origin]+[job]); candidate=next(r for r in rows if r["key"]==job["key"])
+            protected_late=sum(r["status"]=="NO CUMPLE" and r.get("critical",99)<=4 for r in rows)
+            protected_delay=sum(max(0,-r["slack_h"]) for r in rows if r.get("critical",99)<=4)
+            score=(protected_late,round(protected_delay,6),0 if candidate["status"]=="CUMPLE" else 1,max(0,-candidate["slack_h"]),len(cycles))
+            if best is None or score<best[0]: best=(score,origin)
+        if best:
+            origin=best[1]; queues[origin].append(job)
+            same_day=sum(x["process_date"].date()==job["process_date"].date() for x in queues[origin])
+            assignments[job["key"]]={"origin":origin,"order":same_day}
     return assignments
 
-
 def calculate():
-    """Calcula dos colas independientes y valida toda asignación manual."""
-    jobs, plans = load_jobs_and_plan()
-    automatic = fast_automatic(jobs)
-    queues = {"NELLY": [], "FORTALEZA": []}
-    direct = []
-
+    jobs,plans=load_jobs_and_plan(); automatic=fast_automatic(jobs); queues={"NELLY":[],"FORTALEZA":[]}; direct=[]
     for job in jobs:
-        process_key = job["key"]
-        if process_key not in automatic:
-            continue
-        plan = plans.get(process_key, {})
-        suggested = automatic[process_key]
-        manual_origin = plan.get("preenfrio_manual")
-        assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
-        allowed_origins = core.allowed(job)
-
-        if assignment_type != "DIRECTO_SIN_PREENFRIO" and not allowed_origins:
-            continue
-
-        if assignment_type == "DIRECTO_SIN_PREENFRIO":
-            origin = "DIRECTO SIN PREENFRIO"
+        if job["key"] not in automatic: continue
+        plan=plans.get(job["key"],{}); suggested=automatic[job["key"]]; permitted=core.allowed(job)
+        assignment_type=plan.get("tipo_asignacion") or "AUTOMATICA"
+        if assignment_type=="DIRECTO_SIN_PREENFRIO": origin="DIRECTO SIN PREENFRIO"
         else:
-            origin = manual_origin or suggested.get("origin")
-            if core.norm(job.get("client", "")) == "SMART":
-                origin = "NELLY"
-            if origin not in allowed_origins:
-                suggested_origin = suggested.get("origin")
-                origin = suggested_origin if suggested_origin in allowed_origins else allowed_origins[0]
+            if not permitted: continue
+            origin=plan.get("preenfrio_manual") or suggested["origin"]
+            if origin not in permitted: origin=suggested["origin"] if suggested["origin"] in permitted else permitted[0]
+        try: order=int(plan.get("orden_manual") or suggested["order"])
+        except (TypeError,ValueError): order=int(suggested["order"])
+        item={**job,"manual_order":order,"suggested_origin":suggested["origin"],"suggested_order":suggested["order"]}
+        if origin=="DIRECTO SIN PREENFRIO": direct.append(item)
+        else: queues[origin].append(item)
+    rows=[]; cycles=[]
+    for origin in ("NELLY","FORTALEZA"):
+        r,c=core.pack(origin,queues[origin]); rows.extend(r); cycles.extend(c)
+    for order,job in enumerate(sorted(direct,key=lambda j:(core.release_time(j),core.deadline(j))),1):
+        dispatch=core.release_time(job); arrival=dispatch+timedelta(hours=job["transit_h"]); slack=(job["appointment"]-arrival).total_seconds()/3600
+        rows.append({**job,"assigned_origin":"DIRECTO SIN PREENFRIO","assigned_distance_km":None,"order":order,
+                     "start":dispatch,"end":dispatch,"pre_cooling_end":dispatch,"dispatch":dispatch,"arrival":arrival,
+                     "conservation_wait_h":0.0,"portions":[],"slack_h":slack,"status":"CUMPLE" if slack>=0 else "NO CUMPLE"})
+    return rows,cycles,plans
 
-        suggested_order = suggested.get("order") or 9999
-        try:
-            order = int(plan.get("orden_manual") or suggested_order)
-        except (TypeError, ValueError):
-            order = int(suggested_order)
-
-        item = {
-            **job,
-            "manual_order": order,
-            "suggested_origin": suggested.get("origin"),
-            "suggested_order": suggested.get("order"),
-        }
-
-        if origin == "DIRECTO SIN PREENFRIO":
-            direct.append(item)
-            continue
-
-        if origin not in allowed_origins:
-            origin = allowed_origins[0]
-        queues[origin].append(item)
-
-    rows, cycles = [], []
-    for origin in ("NELLY", "FORTALEZA"):
-        queues[origin].sort(key=lambda job: (
-            core.release_time(job), job.get("manual_order", 9999),
-            job.get("critical", 99), job["appointment"], job["source"]
-        ))
-        packed_rows, packed_cycles = core.pack(origin, queues[origin])
-        rows.extend(packed_rows)
-        cycles.extend(packed_cycles)
-
-    sorted_direct = sorted(direct, key=lambda job: (
-        core.release_time(job), job.get("manual_order", 9999),
-        job.get("critical", 99), job["appointment"], job["source"]
-    ))
-    for order, job in enumerate(sorted_direct, 1):
-        dispatch = core.release_time(job)
-        arrival = dispatch + timedelta(hours=job["transit_h"])
-        slack = (job["appointment"] - arrival).total_seconds() / 3600
-        rows.append({
-            **job,
-            "assigned_origin": "DIRECTO SIN PREENFRIO",
-            "assigned_distance_km": None,
-            "order": order,
-            "start": dispatch,
-            "end": dispatch,
-            "arrival": arrival,
-            "slack_h": slack,
-            "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
-        })
-    return rows, cycles, plans
-
-
-def persist_results(rows, cycles):
-    planning = []
-    for row in rows:
-        planning.append({
-            "proceso_id": row["key"],
-            "preenfrio_sugerido": row.get("suggested_origin") or (
-                row["assigned_origin"] if row["assigned_origin"] != "DIRECTO SIN PREENFRIO" else None
-            ),
-            "orden_sugerido": row.get("suggested_order") or row["order"],
-            "fecha_ingreso": row["start"].isoformat(timespec="seconds"),
-            "fecha_despacho": row["end"].isoformat(timespec="seconds"),
-            "llegada_estimada": row["arrival"].isoformat(timespec="seconds"),
-            "cumplimiento": row["status"],
-            "holgura_horas": round(row["slack_h"], 6),
-            "distancia_km": None if row.get("assigned_distance_km") is None else round(row["assigned_distance_km"], 6),
-        })
-    for item in planning:
-        process_id = item.pop("proceso_id")
-        DB.table("procesos_planificacion").update(item).eq("proceso_id", process_id).execute()
-
-    DB.table("ciclos_procesos").delete().neq("ciclo_id", "00000000-0000-0000-0000-000000000000").execute()
-    DB.table("ciclos_preenfrio").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-    for cycle in cycles:
-        inserted = DB.table("ciclos_preenfrio").insert({
-            "preenfrio": cycle["origin"],
-            "numero_ciclo": cycle["cycle_no"],
-            "inicio": cycle["start"].isoformat(timespec="seconds"),
-            "fin": cycle["end"].isoformat(timespec="seconds"),
-            "capacidad": cycle["capacity"],
-            "tarimas_usadas": cycle["used_pallets"],
-            "tarimas_libres": cycle["free_pallets"],
-        }).execute().data[0]
-        links = [
-            {"ciclo_id": inserted["id"], "proceso_id": load["key"], "tarimas": load["pallets"]}
-            for load in cycle["loads"]
-        ]
-        if links:
-            DB.table("ciclos_procesos").insert(links).execute()
-
-
-def serialise(rows, cycles):
-    def iso(value):
-        return value.isoformat(timespec="minutes") if isinstance(value, datetime) else value
-    row_fields = ["key", "farm", "destination", "client", "process_date", "appointment", "transit_h", "critical", "pallets", "week", "assigned_origin", "assigned_distance_km", "distance_options_km", "location_found", "order", "start", "end", "arrival", "slack_h", "status"]
-    cycle_fields = ["cycle_no", "origin", "process_date", "start", "end", "duration_h", "capacity", "used_pallets", "free_pallets", "loads"]
-    return {
-        "ok": True,
-        "source": "SUPABASE",
-        "data": [{field: iso(row[field]) for field in row_fields} for row in rows],
-        "cycles": [{field: iso(cycle[field]) for field in cycle_fields} for cycle in cycles],
-    }
-
+def serialise(rows,cycles):
+    def iso(v): return v.isoformat(timespec="minutes") if isinstance(v,datetime) else v
+    rf=["key","farm","destination","client","process_date","appointment","transit_h","critical","pallets","week","assigned_origin","assigned_distance_km","distance_options_km","location_found","order","start","end","pre_cooling_end","dispatch","arrival","conservation_wait_h","portions","slack_h","status"]
+    cf=["cycle_no","origin","process_date","start","end","duration_h","capacity","used_pallets","free_pallets","loads"]
+    return {"ok":True,"source":"SUPABASE","version":"2.5","data":[{f:iso(r[f]) for f in rf} for r in rows],"cycles":[{f:iso(c[f]) for f in cf} for c in cycles]}
 
 def payload(force=False):
     with LOCK:
-        now = clock.monotonic()
-        if not force and CACHE["payload"] is not None and now - CACHE["time"] < CACHE_SECONDS:
-            return CACHE["payload"]
-        rows, cycles, _ = calculate()
-        CACHE.update(payload=serialise(rows, cycles), time=now)
-        return CACHE["payload"]
-
+        now=clock.monotonic()
+        if not force and CACHE["payload"] is not None and now-CACHE["time"]<CACHE_SECONDS: return CACHE["payload"]
+        rows,cycles,_=calculate(); CACHE.update(payload=serialise(rows,cycles),time=now); return CACHE["payload"]
 
 def save_overrides(overrides):
-    now = datetime.now().astimezone().isoformat()
-    for process_id, change in overrides.items():
-        origin = change.get("origin")
-        order = change.get("order")
-        values = {
-            "proceso_id": process_id,
-            "orden_manual": int(order) if order else None,
-            "modificado_por": "DASHBOARD",
-            "modificado_en": now,
-        }
-        if origin == "DIRECTO SIN PREENFRIO":
-            values.update(preenfrio_manual=None, tipo_asignacion="DIRECTO_SIN_PREENFRIO")
-        elif origin in ("NELLY", "FORTALEZA"):
-            values.update(preenfrio_manual=origin, tipo_asignacion="MANUAL")
-        process_id_value = values.pop("proceso_id")
-        DB.table("procesos_planificacion").update(values).eq("proceso_id", process_id_value).execute()
-
+    now=datetime.now().astimezone().isoformat()
+    for process_id,change in overrides.items():
+        origin=change.get("origin"); values={"orden_manual":int(change.get("order")) if change.get("order") else None,"modificado_por":"DASHBOARD","modificado_en":now}
+        if origin=="DIRECTO SIN PREENFRIO": values.update(preenfrio_manual=None,tipo_asignacion="DIRECTO_SIN_PREENFRIO")
+        elif origin in ("NELLY","FORTALEZA"): values.update(preenfrio_manual=origin,tipo_asignacion="MANUAL")
+        DB.table("procesos_planificacion").update(values).eq("proceso_id",process_id).execute()
 
 def export_bytes():
-    current = payload()
-    frame = pd.DataFrame([{
-        "CLAVE": item["key"], "FECHA_PROCESO": item["process_date"][:10], "CLIENTE": item["client"],
-        "FINCA": item["farm"], "DESTINO": item["destination"], "TARIMAS": item["pallets"],
-        "PREENFRIO_ASIGNADO": item["assigned_origin"], "DISTANCIA_KM": item["assigned_distance_km"],
-        "ORDEN": item["order"], "FECHA_CITA": item["appointment"], "FECHA_INGRESO": item["start"],
-        "FECHA_DESPACHO": item["end"], "ESTADO": item["status"],
-    } for item in current["data"]])
-    buffer = io.BytesIO()
-    frame.to_excel(buffer, sheet_name="PLAN_AJUSTADO", index=False, engine="openpyxl")
-    return buffer.getvalue()
-
-
-def _summary_from_output(output):
-    start = output.find("{")
-    if start < 0:
-        raise ValueError("El importador no devolvió un resumen JSON")
-    summary, _ = json.JSONDecoder().raw_decode(output[start:])
-    return summary
-
-
-def _run_incremental(excel_path, apply=False):
-    command = [sys.executable, str(IMPORTER), str(excel_path)]
-    if apply:
-        command.append("--aplicar")
-    completed = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=300, env=os.environ.copy(),
-    )
-    output = (completed.stdout or "") + "\n" + (completed.stderr or "")
-    if completed.returncode != 0:
-        raise RuntimeError(output.strip() or "El importador terminó con error")
-    return _summary_from_output(output)
-
-
-def synchronise_from_power_automate(body, supplied_token):
-    if not SYNC_TOKEN:
-        return {"ok": False, "aplicado": False, "motivo": "TOKEN_NO_CONFIGURADO"}, 503
-    if not hmac.compare_digest(str(supplied_token or ""), SYNC_TOKEN):
-        return {"ok": False, "aplicado": False, "motivo": "TOKEN_INVALIDO"}, 401
-    if not IMPORTER.is_file():
-        return {"ok": False, "aplicado": False, "motivo": "IMPORTADOR_NO_ENCONTRADO"}, 500
-    file_name = str(body.get("nombre_archivo") or "PLANEACION_SEMANAL 1.xlsx")
-    encoded = body.get("contenido_base64")
-    if not encoded:
-        return {"ok": False, "aplicado": False, "motivo": "CONTENIDO_VACIO"}, 400
-    try:
-        binary = base64.b64decode(encoded, validate=True)
-    except Exception:
-        return {"ok": False, "aplicado": False, "motivo": "BASE64_INVALIDO"}, 400
-    if not binary.startswith(b"PK"):
-        return {"ok": False, "aplicado": False, "motivo": "XLSX_INVALIDO"}, 400
-
-    with tempfile.TemporaryDirectory(prefix="planeacion_sync_") as folder:
-        excel_path = Path(folder) / "PLANEACION_SEMANAL 1.xlsx"
-        excel_path.write_bytes(binary)
-        preview = _run_incremental(excel_path, apply=False)
-        valid = int(preview.get("filas_validas", 0))
-        new = int(preview.get("nuevos", 0))
-        modified = int(preview.get("modificados", 0))
-        unchanged = int(preview.get("sin_cambios", 0))
-        retired = int(preview.get("retirados", 0))
-        ambiguous = int(preview.get("ambiguos", 0))
-        total_existing = modified + unchanged + retired
-        retired_ratio = retired / total_existing if total_existing else 0.0
-        response = {
-            "ok": True, "aplicado": False, "motivo": None, "archivo": file_name,
-            "filas_validas": valid, "filas_rechazadas": int(preview.get("filas_rechazadas", 0)),
-            "nuevos": new, "modificados": modified, "sin_cambios": unchanged,
-            "retirados": retired, "ambiguos": ambiguous,
-            "fecha_sincronizacion": datetime.now().astimezone().isoformat(),
-        }
-        if valid <= 0:
-            response.update(ok=False, motivo="SIN_FILAS_VALIDAS")
-            return response, 422
-        if ambiguous > 0:
-            response["motivo"] = "CONCILIACIONES_AMBIGUAS"
-            return response, 409
-        if retired_ratio > MAX_RETIRED_RATIO:
-            response["motivo"] = "RETIRADOS_SUPERAN_LIMITE"
-            response["proporcion_retirados"] = round(retired_ratio, 6)
-            return response, 409
-        if new + modified + retired == 0:
-            response["motivo"] = "SIN_CAMBIOS"
-            return response, 200
-        _run_incremental(excel_path, apply=True)
-        response["aplicado"] = True
-        response["motivo"] = "APLICADO"
-        response["fecha_sincronizacion"] = datetime.now().astimezone().isoformat()
-        with LOCK:
-            CACHE.update(payload=None, time=0.0)
-        return response, 200
-
+    p=payload(); df=pd.DataFrame([{"CLAVE":x["key"],"FECHA_PROCESO":x["process_date"][:10],"CLIENTE":x["client"],"FINCA":x["farm"],"DESTINO":x["destination"],"TARIMAS":x["pallets"],"PREENFRIO_ASIGNADO":x["assigned_origin"],"ORDEN":x["order"],"FECHA_CITA":x["appointment"],"INGRESO_PREENFRIO":x["start"],"FIN_PREENFRIO":x["pre_cooling_end"],"FECHA_DESPACHO":x["dispatch"],"ESTADO":x["status"]} for x in p["data"]])
+    b=io.BytesIO(); df.to_excel(b,sheet_name="PLAN_AJUSTADO",index=False,engine="openpyxl"); return b.getvalue()
 
 class Handler(core.H):
     def do_GET(self):
-        path = urlparse(self.path).path
+        path=urlparse(self.path).path
         try:
-            if path == "/":
-                return self.sendx(core.HTML.read_bytes(), "text/html; charset=utf-8")
-            if path == "/api/datos":
-                return self.sendx(json.dumps(payload(), ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            if path == "/api/exportar":
-                return self.sendx(export_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", extra={"Content-Disposition": 'attachment; filename="PLAN_AJUSTADO.xlsx"'})
-        except Exception as exc:
-            return self.sendx(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 500)
-        return self.sendx(b"No encontrado", code=404)
-
+            if path=="/": return self.sendx(core.HTML.read_bytes(),"text/html; charset=utf-8")
+            if path=="/api/datos": return self.sendx(json.dumps(payload(),ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            if path=="/api/exportar": return self.sendx(export_bytes(),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",extra={"Content-Disposition":'attachment; filename="PLAN_AJUSTADO.xlsx"'})
+        except Exception as e: return self.sendx(json.dumps({"ok":False,"error":str(e)},ensure_ascii=False).encode(),"application/json; charset=utf-8",500)
+        return self.sendx(b"No encontrado",code=404)
     def do_POST(self):
-        path = urlparse(self.path).path
         try:
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            if path == "/api/sincronizar-planeacion":
-                body = json.loads(raw or b"{}")
-                result, status = synchronise_from_power_automate(body, self.headers.get("X-Sync-Token"))
-                return self.sendx(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8", status)
-            if path == "/api/replan":
-                body = json.loads(raw or b"{}")
-                save_overrides(body.get("overrides", {}))
-                result = payload(force=True)
-                return self.sendx(json.dumps(result, ensure_ascii=False).encode(), "application/json; charset=utf-8")
-            if path == "/api/importar":
-                return self.sendx(json.dumps({"ok": False, "error": "La importación base ahora se realiza con importador_incremental_supabase.py"}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 409)
-        except Exception as exc:
-            return self.sendx(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False).encode(), "application/json; charset=utf-8", 500)
-        return self.sendx(b"No encontrado", code=404)
+            raw=self.rfile.read(int(self.headers.get("Content-Length","0"))); path=urlparse(self.path).path
+            if path=="/api/replan":
+                save_overrides(json.loads(raw or b"{}").get("overrides",{})); result=payload(force=True)
+                return self.sendx(json.dumps(result,ensure_ascii=False).encode(),"application/json; charset=utf-8")
+            if path=="/api/importar": return self.sendx(json.dumps({"ok":False,"error":"La importación base se realiza con el importador incremental"},ensure_ascii=False).encode(),"application/json; charset=utf-8",409)
+        except Exception as e: return self.sendx(json.dumps({"ok":False,"error":str(e)},ensure_ascii=False).encode(),"application/json; charset=utf-8",500)
+        return self.sendx(b"No encontrado",code=404)
 
-
-if __name__ == "__main__":
-    print(f"Planeador Supabase: http://{HOST}:{PORT}")
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+if __name__=="__main__":
+    print(f"Planeador Supabase V2.5: http://{HOST}:{PORT}"); server=ThreadingHTTPServer((HOST,PORT),Handler)
+    try: server.serve_forever()
+    except KeyboardInterrupt: pass
+    finally: server.server_close()
