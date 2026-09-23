@@ -155,8 +155,14 @@ def fast_automatic(jobs):
     return assignments
 
 
-def calculate():
+def calculate(transient_overrides=None):
+    """Calcula el plan y aplica inmediatamente los cambios enviados por las flechas.
+
+    Los cambios tambien se guardan en Supabase, pero la respuesta no depende de
+    volver a leer la base para reflejar el nuevo orden.
+    """
     jobs, plans = load_jobs_and_plan()
+    transient_overrides = transient_overrides or {}
     automatic_assignments = fast_automatic(jobs)
     queues = {"NELLY": [], "FORTALEZA": []}
     direct = []
@@ -165,7 +171,20 @@ def calculate():
         if job["key"] not in automatic_assignments:
             continue
 
-        plan = plans.get(job["key"], {})
+        plan = dict(plans.get(job["key"], {}))
+        immediate_change = transient_overrides.get(job["key"])
+        if immediate_change:
+            immediate_origin = immediate_change.get("origin")
+            immediate_order = immediate_change.get("order")
+            if immediate_order is not None:
+                plan["orden_manual"] = int(immediate_order)
+            if immediate_origin == "DIRECTO SIN PREENFRIO":
+                plan["preenfrio_manual"] = None
+                plan["tipo_asignacion"] = "DIRECTO_SIN_PREENFRIO"
+            elif immediate_origin in ("NELLY", "FORTALEZA"):
+                plan["preenfrio_manual"] = immediate_origin
+                plan["tipo_asignacion"] = "MANUAL"
+
         suggested = automatic_assignments[job["key"]]
         permitted = core.allowed(job)
         assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
@@ -262,7 +281,7 @@ def serialise(rows, cycles):
     return {
         "ok": True,
         "source": "SUPABASE",
-        "version": "2.5.1",
+        "version": "2.5.3",
         "data": [
             {field: json_value(row.get(field)) for field in row_fields}
             for row in rows
@@ -274,7 +293,7 @@ def serialise(rows, cycles):
     }
 
 
-def payload(force=False):
+def payload(force=False, transient_overrides=None):
     with LOCK:
         now = clock.monotonic()
         if (
@@ -283,7 +302,7 @@ def payload(force=False):
             and now - CACHE["time"] < CACHE_SECONDS
         ):
             return CACHE["payload"]
-        rows, cycles, _ = calculate()
+        rows, cycles, _ = calculate(transient_overrides)
         CACHE.update(payload=serialise(rows, cycles), time=now)
         return CACHE["payload"]
 
@@ -356,8 +375,11 @@ class Handler(core.H):
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             path = urlparse(self.path).path
             if path == "/api/replan":
-                save_overrides(json.loads(raw or b"{}").get("overrides", {}))
-                result = payload(force=True)
+                overrides = json.loads(raw or b"{}").get("overrides", {})
+                save_overrides(overrides)
+                # Reflejo inmediato del nuevo orden, sin depender de una segunda
+                # lectura a Supabase dentro de la misma solicitud.
+                result = payload(force=True, transient_overrides=overrides)
                 body = json.dumps(result, ensure_ascii=False, default=str).encode()
                 return self.sendx(body, "application/json; charset=utf-8")
             if path == "/api/importar":
@@ -376,7 +398,7 @@ class Handler(core.H):
 
 
 if __name__ == "__main__":
-    print(f"Planeador Supabase V2.5.1: http://{HOST}:{PORT}")
+    print(f"Planeador Supabase V2.5.3: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()
