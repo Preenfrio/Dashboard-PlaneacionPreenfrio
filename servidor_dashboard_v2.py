@@ -356,20 +356,32 @@ def pack(origin, sequence):
         pending = [job for job in pending if job["key"] not in completed]
         current = end + timedelta(minutes=GAP_MIN)
 
-    rows, counters = [], {}
+    # El orden mostrado debe corresponder al orden REAL aplicado por pack().
+    # Antes se recorria `sequence` en su orden original, por eso las flechas
+    # recalculaban los ciclos pero la columna Orden regresaba aparentemente igual.
+    order_by_key = {}
+    dates = sorted({job["process_date"].date() for job in sequence})
+    for process_date in dates:
+        same_day = [
+            job for job in sequence
+            if job["process_date"].date() == process_date
+        ]
+        same_day.sort(key=lambda job: daily_priority(job, origin))
+        for position, job in enumerate(same_day, 1):
+            order_by_key[job["key"]] = position
+
+    rows = []
     for job in sequence:
         finish = last[job["key"]]
         dispatch = finish
         arrival = dispatch + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
-        day_key = (job["process_date"].date(), origin)
-        counters[day_key] = counters.get(day_key, 0) + 1
         rows.append(
             {
                 **job,
                 "assigned_origin": origin,
                 "assigned_distance_km": job["distance_options_km"].get(origin),
-                "order": counters[day_key],
+                "order": order_by_key[job["key"]],
                 "start": first[job["key"]],
                 "end": finish,
                 "pre_cooling_end": finish,
@@ -515,7 +527,7 @@ def serial(rows, cycles):
     ]
     return {
         "ok": True,
-        "version": "2.5.1",
+        "version": "2.5.2",
         "excel": EXCEL.name,
         "modified": datetime.fromtimestamp(EXCEL.stat().st_mtime).isoformat(timespec="seconds"),
         "data": [
@@ -612,7 +624,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Planeador V2.5.1: http://{HOST}:{PORT}")
+    print(f"Planeador V2.5.2: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), H)
     if HOST == "127.0.0.1":
         threading.Timer(0.6, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
