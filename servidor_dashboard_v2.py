@@ -283,56 +283,40 @@ def daily_priority(job, origin):
 
 
 # REGLA_FINCA_LOCAL_V2
+# REGLA_RELLENO_FINCA_LOCAL_V3
 def is_local_farm_for_origin(job, origin):
     """True cuando el proceso pertenece a la finca donde opera la cámara."""
     farm = norm(job.get("farm"))
-
     if origin == "NELLY":
         return (
             farm.startswith("A01 003")
             or "DOÑA NELLY" in farm
             or "DONA NELLY" in farm
         )
-
     if origin == "FORTALEZA":
         return (
             farm.startswith("A01 002")
             or farm == "FORTALEZA"
             or "A01 002 FORTALEZA" in farm
         )
-
     return False
 
 
-def available_jobs_for_cycle(pending, remaining, current, origin):
-    """Devuelve fruta disponible sin alterar la prioridad normal.
-
-    1. Si existe fruta liberada normalmente, devuelve esa fruta.
-    2. Si no existe y la cámara quedaría esperando, permite fruta local del
-       mismo día antes de las 19:00.
-    3. Si tampoco existe fruta local, devuelve vacío para que pack avance a la
-       siguiente liberación normal.
-    """
-    normal = [
-        job
-        for job in pending
-        if remaining[job["key"]] > 1e-9
-        and release_time(job) <= current
-    ]
-    if normal:
-        return normal
-
+def local_fillers(pending, remaining, current, origin, excluded_keys=None):
+    """Fruta local del día que puede aprovechar capacidad antes de las 19:00."""
+    excluded_keys = excluded_keys or set()
     return [
         job
         for job in pending
-        if remaining[job["key"]] > 1e-9
+        if job["key"] not in excluded_keys
+        and remaining[job["key"]] > 1e-9
         and job["process_date"].date() == current.date()
         and current < release_time(job)
         and is_local_farm_for_origin(job, origin)
     ]
 
 def pack(origin, sequence):
-    """FIFO diario con excepción de finca local para tiempos muertos."""
+    """FIFO diario, prioridad normal y relleno excepcional con finca local."""
     if not sequence:
         return [], []
 
@@ -343,12 +327,22 @@ def pack(origin, sequence):
     current = min(release_time(job) for job in pending)
 
     while pending:
-        available = available_jobs_for_cycle(
-            pending,
-            remaining,
-            current,
-            origin,
-        )
+        available = [
+            job
+            for job in pending
+            if release_time(job) <= current
+            and remaining[job["key"]] > 1e-9
+        ]
+
+        if not available:
+            # Cámara completamente vacía: antes de saltar a las 19:00,
+            # puede iniciar fruta de la finca local del mismo día.
+            available = local_fillers(
+                pending,
+                remaining,
+                current,
+                origin,
+            )
 
         if not available:
             current = min(
@@ -356,23 +350,36 @@ def pack(origin, sequence):
                 for job in pending
                 if remaining[job["key"]] > 1e-9
             )
-            available = available_jobs_for_cycle(
-                pending,
-                remaining,
-                current,
-                origin,
-            )
+            available = [
+                job
+                for job in pending
+                if release_time(job) <= current
+                and remaining[job["key"]] > 1e-9
+            ]
 
         oldest_date = min(job["process_date"].date() for job in available)
-        day_jobs = [
+        normal_jobs = [
             job
             for job in available
             if job["process_date"].date() == oldest_date
         ]
-        day_jobs.sort(key=lambda job: daily_priority(job, origin))
+        normal_jobs.sort(key=lambda job: daily_priority(job, origin))
+
+        # Los procesos normales siempre mandan. Solo si dejan capacidad libre,
+        # se agregan procesos de la finca local del día en curso.
+        normal_keys = {job["key"] for job in normal_jobs}
+        fillers = local_fillers(
+            pending,
+            remaining,
+            current,
+            origin,
+            excluded_keys=normal_keys,
+        )
+        fillers.sort(key=lambda job: daily_priority(job, origin))
+        cycle_jobs = normal_jobs + fillers
 
         space, loads, duration = capacity, [], 0.0
-        for job in day_jobs:
+        for job in cycle_jobs:
             if space <= 1e-9:
                 break
 
@@ -455,7 +462,6 @@ def pack(origin, sequence):
         dispatch = finish
         arrival = dispatch + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
-
         rows.append(
             {
                 **job,
