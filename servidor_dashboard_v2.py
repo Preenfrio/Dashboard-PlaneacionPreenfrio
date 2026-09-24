@@ -255,18 +255,29 @@ def deadline(job):
 
 
 def daily_priority(job, origin):
-    """Orden dentro del mismo dia.
+    """Orden dentro del mismo día y cámara.
 
-    Si existe orden manual, manda primero para que las flechas realmente reordenen.
-    Sin orden manual, todos reciben 9999 y se conservan las reglas automaticas:
-    cita, criticidad, distancia de finca y orden fuente.
+    Si existe orden manual, las flechas dominan la secuencia.
+    Sin orden manual, la sugerencia automática prioriza:
+    criticidad ascendente, deadline, distancia y fuente.
     """
     distance = job.get("distance_options_km", {}).get(origin)
+    distance_value = distance if distance is not None else 1_000_000.0
+    manual_order = job.get("manual_order")
+
+    if manual_order is not None:
+        return (
+            int(manual_order),
+            deadline(job),
+            job.get("critical", 99),
+            distance_value,
+            job.get("source", 999999),
+        )
+
     return (
-        job.get("manual_order", 9999),
-        deadline(job),
         job.get("critical", 99),
-        distance if distance is not None else 1_000_000.0,
+        deadline(job),
+        distance_value,
         job.get("source", 999999),
     )
 
@@ -403,8 +414,8 @@ def automatic(jobs):
         jobs,
         key=lambda job: (
             release_time(job),
-            deadline(job),
             job.get("critical", 99),
+            deadline(job),
             job["source"],
         ),
     )

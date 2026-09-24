@@ -114,8 +114,8 @@ def fast_automatic(jobs):
         jobs,
         key=lambda job: (
             core.release_time(job),
-            core.deadline(job),
             job.get("critical", 99),
+            core.deadline(job),
             job["source"],
         ),
     )
