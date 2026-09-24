@@ -372,21 +372,47 @@ def pack(origin, sequence):
 
         # Los procesos normales siempre mandan. Solo si dejan capacidad libre,
         # se agregan procesos de la finca local del día en curso.
+        # REGLA_RELLENO_DISPONIBLE_V5
+        # Primero manda el día más antiguo. Si deja espacio, se agregan
+        # procesos de días posteriores que ya estén liberados a esta hora.
         normal_keys = {job["key"] for job in normal_jobs}
-        fillers = local_fillers(
-            pending,
-            remaining,
-            current,
-            origin,
-            excluded_keys=normal_keys,
-        )
-        fillers.sort(
+        released_fillers = [
+            job
+            for job in available
+            if job["key"] not in normal_keys
+        ]
+        released_fillers.sort(
             key=lambda job: (
                 job["process_date"].date(),
                 daily_priority(job, origin),
             )
         )
-        cycle_jobs = normal_jobs + fillers
+
+        # La excepción de finca local queda como último recurso y únicamente
+        # para fruta que todavía no alcanza su liberación normal de las 19:00.
+        excluded_keys = normal_keys | {
+            job["key"] for job in released_fillers
+        }
+        early_local_fillers = local_fillers(
+            pending,
+            remaining,
+            current,
+            origin,
+            excluded_keys=excluded_keys,
+        )
+        early_local_fillers = [
+            job
+            for job in early_local_fillers
+            if release_time(job) > current
+        ]
+        early_local_fillers.sort(
+            key=lambda job: (
+                job["process_date"].date(),
+                daily_priority(job, origin),
+            )
+        )
+
+        cycle_jobs = normal_jobs + released_fillers + early_local_fillers
 
         space, loads, duration = capacity, [], 0.0
         for job in cycle_jobs:
