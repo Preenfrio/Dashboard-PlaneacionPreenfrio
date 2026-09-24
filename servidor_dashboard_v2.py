@@ -282,8 +282,57 @@ def daily_priority(job, origin):
     )
 
 
+# REGLA_FINCA_LOCAL_V2
+def is_local_farm_for_origin(job, origin):
+    """True cuando el proceso pertenece a la finca donde opera la cámara."""
+    farm = norm(job.get("farm"))
+
+    if origin == "NELLY":
+        return (
+            farm.startswith("A01 003")
+            or "DOÑA NELLY" in farm
+            or "DONA NELLY" in farm
+        )
+
+    if origin == "FORTALEZA":
+        return (
+            farm.startswith("A01 002")
+            or farm == "FORTALEZA"
+            or "A01 002 FORTALEZA" in farm
+        )
+
+    return False
+
+
+def available_jobs_for_cycle(pending, remaining, current, origin):
+    """Devuelve fruta disponible sin alterar la prioridad normal.
+
+    1. Si existe fruta liberada normalmente, devuelve esa fruta.
+    2. Si no existe y la cámara quedaría esperando, permite fruta local del
+       mismo día antes de las 19:00.
+    3. Si tampoco existe fruta local, devuelve vacío para que pack avance a la
+       siguiente liberación normal.
+    """
+    normal = [
+        job
+        for job in pending
+        if remaining[job["key"]] > 1e-9
+        and release_time(job) <= current
+    ]
+    if normal:
+        return normal
+
+    return [
+        job
+        for job in pending
+        if remaining[job["key"]] > 1e-9
+        and job["process_date"].date() == current.date()
+        and current < release_time(job)
+        and is_local_farm_for_origin(job, origin)
+    ]
+
 def pack(origin, sequence):
-    """FIFO por día; dentro del día: cita, criticidad, distancia y orden manual."""
+    """FIFO diario con excepción de finca local para tiempos muertos."""
     if not sequence:
         return [], []
 
@@ -294,34 +343,43 @@ def pack(origin, sequence):
     current = min(release_time(job) for job in pending)
 
     while pending:
-        available = [
-            job
-            for job in pending
-            if release_time(job) <= current and remaining[job["key"]] > 1e-9
-        ]
+        available = available_jobs_for_cycle(
+            pending,
+            remaining,
+            current,
+            origin,
+        )
+
         if not available:
             current = min(
                 release_time(job)
                 for job in pending
                 if remaining[job["key"]] > 1e-9
             )
-            available = [
-                job
-                for job in pending
-                if release_time(job) <= current and remaining[job["key"]] > 1e-9
-            ]
+            available = available_jobs_for_cycle(
+                pending,
+                remaining,
+                current,
+                origin,
+            )
 
         oldest_date = min(job["process_date"].date() for job in available)
-        day_jobs = [job for job in available if job["process_date"].date() == oldest_date]
+        day_jobs = [
+            job
+            for job in available
+            if job["process_date"].date() == oldest_date
+        ]
         day_jobs.sort(key=lambda job: daily_priority(job, origin))
 
         space, loads, duration = capacity, [], 0.0
         for job in day_jobs:
             if space <= 1e-9:
                 break
+
             quantity = min(space, remaining[job["key"]])
             if quantity <= 1e-9:
                 continue
+
             loads.append(
                 {
                     "key": job["key"],
@@ -332,13 +390,20 @@ def pack(origin, sequence):
                 }
             )
             first.setdefault(job["key"], current)
-            portions.setdefault(job["key"], []).append({"start": current, "pallets": quantity})
+            portions.setdefault(job["key"], []).append(
+                {"start": current, "pallets": quantity}
+            )
             remaining[job["key"]] -= quantity
             space -= quantity
-            duration = max(duration, hours(job["cycle_options"].get(origin, 0)))
+            duration = max(
+                duration,
+                hours(job["cycle_options"].get(origin, 0)),
+            )
 
         if not loads:
-            raise ValueError(f"No se pudo formar ciclo para {origin} el {oldest_date}")
+            raise ValueError(
+                f"No se pudo formar ciclo para {origin} el {oldest_date}"
+            )
 
         end = current + timedelta(hours=duration)
         for load in loads:
@@ -364,17 +429,20 @@ def pack(origin, sequence):
             if remaining[load["key"]] <= 1e-9:
                 last[load["key"]] = end
                 completed.append(load["key"])
-        pending = [job for job in pending if job["key"] not in completed]
+
+        pending = [
+            job for job in pending
+            if job["key"] not in completed
+        ]
         current = end + timedelta(minutes=GAP_MIN)
 
-    # El orden mostrado debe corresponder al orden REAL aplicado por pack().
-    # Antes se recorria `sequence` en su orden original, por eso las flechas
-    # recalculaban los ciclos pero la columna Orden regresaba aparentemente igual.
+    # Mantiene el orden visible real, incluidas las flechas manuales.
     order_by_key = {}
     dates = sorted({job["process_date"].date() for job in sequence})
     for process_date in dates:
         same_day = [
-            job for job in sequence
+            job
+            for job in sequence
             if job["process_date"].date() == process_date
         ]
         same_day.sort(key=lambda job: daily_priority(job, origin))
@@ -387,6 +455,7 @@ def pack(origin, sequence):
         dispatch = finish
         arrival = dispatch + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
+
         rows.append(
             {
                 **job,
@@ -404,6 +473,7 @@ def pack(origin, sequence):
                 "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
             }
         )
+
     return rows, cycles
 
 
