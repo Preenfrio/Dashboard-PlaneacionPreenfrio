@@ -302,18 +302,23 @@ def is_local_farm_for_origin(job, origin):
     return False
 
 
+# REGLA_RELLENO_FINCA_LOCAL_V4
 def local_fillers(pending, remaining, current, origin, excluded_keys=None):
-    """Fruta local del día que puede aprovechar capacidad antes de las 19:00."""
+    """Fruta de la finca local que puede completar capacidad libre.
+
+    Puede usar procesos locales con fecha de proceso igual o anterior a la
+    fecha actual de la cámara. Nunca toma fruta fechada para un día futuro.
+    """
     excluded_keys = excluded_keys or set()
     return [
         job
         for job in pending
         if job["key"] not in excluded_keys
         and remaining[job["key"]] > 1e-9
-        and job["process_date"].date() == current.date()
-        and current < release_time(job)
+        and job["process_date"].date() <= current.date()
         and is_local_farm_for_origin(job, origin)
     ]
+
 
 def pack(origin, sequence):
     """FIFO diario, prioridad normal y relleno excepcional con finca local."""
@@ -375,7 +380,12 @@ def pack(origin, sequence):
             origin,
             excluded_keys=normal_keys,
         )
-        fillers.sort(key=lambda job: daily_priority(job, origin))
+        fillers.sort(
+            key=lambda job: (
+                job["process_date"].date(),
+                daily_priority(job, origin),
+            )
+        )
         cycle_jobs = normal_jobs + fillers
 
         space, loads, duration = capacity, [], 0.0
