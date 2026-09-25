@@ -715,6 +715,11 @@ class H(BaseHTTPRequestHandler):
         try:
             if path == "/":
                 return self.sendx(HTML.read_bytes(), "text/html; charset=utf-8")
+            if path == "/imagen_portada.jpg":
+                image_path = BASE / "imagen_portada.jpg"
+                if not image_path.exists():
+                    return self.sendx(b"Imagen no encontrada", code=404)
+                return self.sendx(image_path.read_bytes(), "image/jpeg")
             if path == "/api/datos":
                 body = json.dumps(payload(), ensure_ascii=False, default=str).encode()
                 return self.sendx(body, "application/json; charset=utf-8")
