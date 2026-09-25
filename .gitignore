@@ -1,3 +1,7 @@
 sincronizacion_planeacion.log
 .monitor_planeacion_estado.json
 *.antes_*
+
+__pycache__/
+*.py[cod]
+*.diff
