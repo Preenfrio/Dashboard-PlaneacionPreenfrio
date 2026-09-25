@@ -404,7 +404,37 @@
     
         .tabs{display:flex;gap:7px;margin-bottom:10px}.tab{border:0;padding:10px 15px;border-radius:8px;background:#e7efeb;font-weight:800;cursor:pointer}.tab.active{background:#076947;color:#fff}
         .cycleGrid{min-width:1250px}.cycleHead,.cycleRow{display:grid;grid-template-columns:95px 65px 125px 155px 155px 105px 90px minmax(430px,1fr);gap:8px;align-items:center}.cycleHead{position:sticky;top:0;z-index:20;background:#075f45;color:#fff;padding:11px;font-weight:800}.cycleRow{padding:9px;border-bottom:1px solid #dfe8e4}.loadChip{display:inline-block;padding:5px 8px;margin:2px;border-radius:7px;background:#dbeafe;color:#17469b;cursor:help;transition:.15s}.loadChip:hover{background:#bfdbfe;transform:translateY(-1px);box-shadow:0 3px 8px #1e3a8a22}
-    </style>
+    
+        /* FONDO_BODY_CHANITOS_V1 */
+        html {
+            min-height: 100%;
+            background: #f4ecd2;
+        }
+        body {
+            min-height: 100vh;
+            background-image:
+                linear-gradient(rgba(255, 252, 240, .76), rgba(238, 247, 239, .82)),
+                url("fondo_body.jpg");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }
+        main {
+            background: transparent !important;
+        }
+        .kpis > div,
+        .filters,
+        .panel,
+        .contingency,
+        .card,
+        .table-card {
+            background-color: rgba(255, 255, 255, .92) !important;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+        }
+
+</style>
 </head>
 
 <body>

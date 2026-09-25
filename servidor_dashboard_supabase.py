@@ -361,6 +361,11 @@ class Handler(core.H):
                 if not image_path.exists():
                     return self.sendx(b"Imagen no encontrada", code=404)
                 return self.sendx(image_path.read_bytes(), "image/jpeg")
+            if path == "/fondo_body.jpg":
+                image_path = core.BASE / "fondo_body.jpg"
+                if not image_path.exists():
+                    return self.sendx(b"Imagen no encontrada", code=404)
+                return self.sendx(image_path.read_bytes(), "image/jpeg")
             if path == "/api/datos":
                 body = json.dumps(payload(), ensure_ascii=False, default=str).encode()
                 return self.sendx(body, "application/json; charset=utf-8")
