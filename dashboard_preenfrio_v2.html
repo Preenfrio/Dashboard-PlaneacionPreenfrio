@@ -28,12 +28,43 @@
         }
 
         header {
-            padding: 19px 22px;
+            position: relative;
+            min-height: 138px;
+            padding: 24px 22px;
             color: white;
-            background: linear-gradient(110deg, var(--dg), #00a651);
             display: flex;
             justify-content: space-between;
-            align-items: center
+            align-items: center;
+            overflow: hidden;
+            isolation: isolate;
+            background: #05633f;
+        }
+        .header-bg {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center;
+            z-index: -2;
+        }
+        header::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            z-index: -1;
+            background: linear-gradient(90deg, rgba(2, 55, 35, .88) 0%, rgba(2, 73, 44, .58) 47%, rgba(2, 55, 35, .32) 100%);
+        }
+        header > div {
+            position: relative;
+            z-index: 1;
+        }
+        #updated {
+            padding: 7px 10px;
+            border-radius: 8px;
+            background: rgba(0, 48, 31, .42);
+            backdrop-filter: blur(3px);
+            text-shadow: 0 1px 3px #000;
         }
 
         h1 {
@@ -378,6 +409,7 @@
 
 <body>
     <header>
+        <img class="header-bg" src="imagen_portada.jpg" alt="">
         <div>
             <h1>Planeador de Preenfrío</h1>
             <div>Asignación editable · Contingencia directa · SMART se preenfría en Nelly</div>
