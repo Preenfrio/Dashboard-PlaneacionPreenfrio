@@ -434,6 +434,115 @@
             -webkit-backdrop-filter: blur(4px);
         }
 
+
+        /* FILTRO_FECHAS_UI_V8 */
+        .filters {
+            position: relative;
+            z-index: 80;
+            overflow: visible !important;
+        }
+        .filters + .card {
+            position: relative;
+            z-index: 1;
+        }
+        .multi {
+            width: 100%;
+            position: relative;
+        }
+        .dateBtn {
+            width: 100%;
+            min-height: 38px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            text-align: left;
+            cursor: pointer;
+            color: #14221d;
+            font-weight: 650;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .dateBtn::after {
+            content: '▾';
+            flex: 0 0 auto;
+            color: #05633f;
+            font-size: 14px;
+        }
+        .multi.open .dateBtn {
+            border-color: #079653;
+            box-shadow: 0 0 0 3px rgba(7, 150, 83, .14);
+        }
+        .menu {
+            top: calc(100% + 7px);
+            left: 0;
+            width: min(340px, calc(100vw - 48px));
+            min-width: 280px;
+            max-height: 330px;
+            padding: 0;
+            overflow: hidden;
+            border: 1px solid #b8cec4;
+            border-radius: 12px;
+            background: rgba(255,255,255,.98);
+            box-shadow: 0 18px 42px rgba(1, 57, 36, .26);
+        }
+        .multi.open .menu {
+            display: flex;
+            flex-direction: column;
+        }
+        .dateMenuActions {
+            display: flex;
+            gap: 8px;
+            padding: 10px;
+            background: #edf7f1;
+            border-bottom: 1px solid #d7e7df;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+        .dateMenuActions button {
+            border: 1px solid #b9d2c6;
+            border-radius: 7px;
+            padding: 7px 10px;
+            background: #fff;
+            color: #05633f;
+            font-weight: 750;
+            cursor: pointer;
+        }
+        .dateMenuActions button:hover {
+            background: #05633f;
+            color: #fff;
+        }
+        #dateChecks {
+            overflow-y: auto;
+            padding: 8px;
+            max-height: 250px;
+            scrollbar-gutter: stable;
+        }
+        #dateChecks label {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 8px 9px;
+            border-radius: 7px;
+            color: #1f352d;
+            cursor: pointer;
+        }
+        #dateChecks label:hover {
+            background: #edf7f1;
+        }
+        #dateChecks input {
+            width: 16px;
+            height: 16px;
+            accent-color: #079653;
+        }
+        @media(max-width:1100px) {
+            .menu {
+                min-width: 250px;
+            }
+        }
+
 </style>
 </head>
 
@@ -464,7 +573,8 @@
         <section class="card filters">
             <div class="fb"><label>Fechas de proceso</label>
                 <div class="multi" id="multi"><button class="dateBtn" id="dateBtn">Todas las fechas</button>
-                    <div class="menu"><button id="allDates">Todas</button> <button id="clearDates">Limpiar</button>
+                    <div class="menu">
+                        <div class="dateMenuActions"><button type="button" id="allDates">Seleccionar todas</button><button type="button" id="clearDates">Limpiar</button></div>
                         <div id="dateChecks"></div>
                     </div>
                 </div>
