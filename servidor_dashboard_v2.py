@@ -253,6 +253,21 @@ def allowed(job):
     return [origin for origin in ("NELLY", "FORTALEZA") if enabled[origin]]
 
 
+def manual_allowed(job):
+    """Cámaras que el usuario puede elegir manualmente.
+
+    La asignación automática conserva reglas por cliente y finca. La decisión
+    manual puede cambiar de cámara cuando el catálogo tenga tiempo de ciclo en
+    esa cámara. SMART permanece exclusivamente en NELLY por regla operativa.
+    """
+    client = norm(job.get("client"))
+    options = job.get("cycle_options") or {}
+    enabled = [origin for origin in ("NELLY", "FORTALEZA") if hours(options.get(origin, 0)) > 0]
+    if client == "SMART":
+        return ["NELLY"] if "NELLY" in enabled else []
+    return enabled
+
+
 def release_time(job):
     return datetime.combine(job["process_date"].date(), time(START_HOUR))
 
@@ -585,7 +600,11 @@ def recalc(overrides=None):
         if origin == "DIRECTO SIN PREENFRIO":
             direct.append(job_copy)
             continue
-        permitted = allowed(job)
+        automatic_permitted = allowed(job)
+        is_manual = job["key"] in selected_overrides and bool(chosen.get("origin"))
+        permitted = manual_allowed(job) if is_manual else automatic_permitted
+        if not permitted:
+            continue
         if origin not in permitted:
             automatic_origin = automatic_assignments[job["key"]]["origin"]
             origin = automatic_origin if automatic_origin in permitted else permitted[0]
@@ -657,7 +676,7 @@ def serial(rows, cycles):
     ]
     return {
         "ok": True,
-        "version": "2.5.2",
+        "version": "2.6.0",
         "excel": EXCEL.name,
         "modified": datetime.fromtimestamp(EXCEL.stat().st_mtime).isoformat(timespec="seconds"),
         "data": [
@@ -764,7 +783,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Planeador V2.5.2: http://{HOST}:{PORT}")
+    print(f"Planeador V2.6.0: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), H)
     if HOST == "127.0.0.1":
         threading.Timer(0.6, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()

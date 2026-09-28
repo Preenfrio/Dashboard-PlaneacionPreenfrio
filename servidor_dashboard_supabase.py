@@ -186,21 +186,16 @@ def calculate(transient_overrides=None):
                 plan["tipo_asignacion"] = "MANUAL"
 
         suggested = automatic_assignments[job["key"]]
-        permitted = core.allowed(job)
         assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
 
         if assignment_type == "DIRECTO_SIN_PREENFRIO":
             origin = "DIRECTO SIN PREENFRIO"
         else:
+            is_manual = assignment_type == "MANUAL" and bool(plan.get("preenfrio_manual"))
+            permitted = core.manual_allowed(job) if is_manual else core.allowed(job)
             if not permitted:
                 continue
-            origin = plan.get("preenfrio_manual") or suggested["origin"]
-
-            # Defensa de regresión: SMART siempre queda en NELLY, incluso si
-            # existe una asignación manual histórica a FORTALEZA.
-            if core.norm(job.get("client")) == "SMART":
-                origin = "NELLY"
-
+            origin = plan.get("preenfrio_manual") if is_manual else suggested["origin"]
             if origin not in permitted:
                 origin = suggested["origin"] if suggested["origin"] in permitted else permitted[0]
 
@@ -287,7 +282,7 @@ def serialise(rows, cycles):
     return {
         "ok": True,
         "source": "SUPABASE",
-        "version": "2.5.4",
+        "version": "2.6.0",
         "data": [
             {field: json_value(row.get(field)) for field in row_fields}
             for row in rows
@@ -414,7 +409,7 @@ class Handler(core.H):
 
 
 if __name__ == "__main__":
-    print(f"Planeador Supabase V2.5.4: http://{HOST}:{PORT}")
+    print(f"Planeador Supabase V2.6.0: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()
