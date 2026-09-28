@@ -40,11 +40,48 @@ def cols(df):
     m={norm(c):c for c in df.columns}; missing=[x for x in REQUIRED if norm(x) not in m]
     if missing:raise ValueError("Faltan columnas: "+", ".join(missing))
     return {x:m.get(norm(x)) for x in REQUIRED+OPTIONAL}
+def valid_ov(v):
+    """Acepta OV reales; descarta 0, vacios y mensajes de diagnostico."""
+    s = norm(v)
+    if not s or s in {"0", "NAN", "NONE"}:
+        return None
+    bad = (
+        "OV ND", "SIN OV", "NO COMPATIBLE", "NO ENCONTRADA",
+        "NO ENCONTRADO", "PENDIENTE", "ERROR"
+    )
+    if any(x in s for x in bad):
+        return None
+    return s
+
+def canonical_key(r):
+    """Identidad estable basada en datos de negocio, no en texto formateado de Power Query."""
+    fp = (r.get("fecha_proceso") or "")[:10].replace("-", "")
+    fc = (r.get("fecha_cita") or "")[:10].replace("-", "")
+    occurrence = r.get("ocurrencia_consulta") or r.get("ocurrencia_importador") or 1
+    return "CANON|" + "|".join([
+        slug(r.get("finca") or ""),
+        fp,
+        fc,
+        slug(r.get("destino") or ""),
+        slug(r.get("sku") or ""),
+        slug(r.get("lote") or ""),
+        str(int(occurrence)),
+    ])
+
 def base_key(r):
-    return "|".join([slug(r.get("ov") or "SIN-OV"),slug(r["sku"]),slug(r.get("lote") or "SIN-LOTE"),slug(r["finca"]),slug(r["destino"]),r["fecha_proceso"][:10]])
+    return "|".join([
+        slug(valid_ov(r.get("ov")) or "SIN-OV"),
+        slug(r["sku"]),
+        slug(r.get("lote") or "SIN-LOTE"),
+        slug(r["finca"]),
+        slug(r["destino"]),
+        r["fecha_proceso"][:10],
+    ])
+
 def identity(r):
-    if norm(r.get("llave_embarque_consulta")):return "ORIGEN|"+norm(r["llave_embarque_consulta"])
-    return f"{base_key(r)}|OC-{r['ocurrencia_importador']}"
+    # Desde esta version la identidad nueva usa la llave canonica.
+    # La conciliacion tambien crea alias canonicos para registros historicos.
+    return canonical_key(r)
 
 def read_excel(path):
     df=pd.read_excel(path,sheet_name="PLANEACION",engine="openpyxl"); c=cols(df); out=[]; rejected=[]; seen={}; ovcol=c.get("OV") or c.get("OV OM")
@@ -52,7 +89,7 @@ def read_excel(path):
         fp=dt(row[c["Fecha de proceso"]]); fc=dt(row[c["FECHA CITA"]]); pal=num(row[c["Pallets"]])
         reason="Pallets no numérico (por ejemplo, Granel)" if pal is None else "Pallets debe ser mayor que cero" if pal<=0 else "Fecha de proceso inválida" if not fp else "Fecha de cita inválida" if not fc else None
         if reason: rejected.append({"fila":i+2,"motivo":reason}); continue
-        ov=None if not ovcol or pd.isna(row[ovcol]) else str(row[ovcol]).strip() or None
+        ov=None if not ovcol or pd.isna(row[ovcol]) else valid_ov(row[ovcol])
         r={"ov":ov,"descripcion":str(row[c["Descripción"]]).strip(),"sku":str(row[c["SKU"]]).strip(),"lote":None if pd.isna(row[c["Lote"]]) else str(row[c["Lote"]]).strip(),"finca":str(row[c["Finca"]]).strip(),"destino":str(row[c["Destino"]]).strip(),"cliente":None,"cantidad":num(row[c["Cantidad"]]),"pallets":pal,"fecha_proceso":fp,"fecha_cita":fc,"semana":integer(row[c["SEMANA"]]) if c.get("SEMANA") else pd.Timestamp(fp).isocalendar().week,"dias_transito":num(row[c["DIAS TRANSITO"]]) if c.get("DIAS TRANSITO") else None,"horas_transito":num(row[c["HORAS TRANSITO"]]) if c.get("HORAS TRANSITO") else None,"nivel_critico":integer(row[c["NIVEL CRITICO"]]) if c.get("NIVEL CRITICO") else None,"llave_base_consulta":None if not c.get("Llave_Base_Consulta") or pd.isna(row[c["Llave_Base_Consulta"]]) else str(row[c["Llave_Base_Consulta"]]).strip(),"ocurrencia_consulta":integer(row[c["Ocurrencia_Consulta"]]) if c.get("Ocurrencia_Consulta") else None,"llave_embarque_consulta":None if not c.get("Llave_Embarque_Consulta") or pd.isna(row[c["Llave_Embarque_Consulta"]]) else str(row[c["Llave_Embarque_Consulta"]]).strip(),"fila_excel":i+2}
         b=base_key(r);seen[b]=seen.get(b,0)+1;r["ocurrencia_importador"]=r["ocurrencia_consulta"] or seen[b];r["identidad_normalizada"]=identity(r)
         r["hash_contenido"]=hash_json({k:v for k,v in r.items() if k not in ("fila_excel","hash_contenido","identidad_normalizada")});out.append(r)
@@ -62,15 +99,50 @@ def daydiff(a,b):
     try:return abs((pd.Timestamp(a)-pd.Timestamp(b)).total_seconds())/86400
     except:return 9999
 
-def similarity(new,old):
-    score=0
-    if norm(new.get("ov")) and norm(new.get("ov"))==norm(old.get("ov")):score+=55
-    if norm(new["sku"])==norm(old.get("sku")):score+=25
-    if norm(new.get("lote")) and norm(new.get("lote"))==norm(old.get("lote")):score+=30
-    if norm(new["finca"])==norm(old.get("finca")):score+=12
-    if norm(new["destino"])==norm(old.get("destino")):score+=12
-    if daydiff(new["fecha_proceso"],old.get("fecha_proceso"))<=1:score+=10
-    if abs((new.get("pallets") or 0)-(old.get("pallets") or 0))<0.001:score+=8
+def similarity(new, old):
+    """Puntaje de conciliacion para distinguir partidas repetidas sin adivinar."""
+    score = 0
+
+    new_ov = valid_ov(new.get("ov"))
+    old_ov = valid_ov(old.get("ov"))
+    if new_ov and new_ov == old_ov:
+        score += 70
+
+    if norm(new.get("sku")) == norm(old.get("sku")):
+        score += 30
+    if norm(new.get("lote")) and norm(new.get("lote")) == norm(old.get("lote")):
+        score += 35
+    if norm(new.get("finca")) == norm(old.get("finca")):
+        score += 15
+    if norm(new.get("destino")) == norm(old.get("destino")):
+        score += 20
+
+    # Las dos fechas exactas distinguen embarques del mismo lote/SKU.
+    if daydiff(new.get("fecha_proceso"), old.get("fecha_proceso")) == 0:
+        score += 25
+    elif daydiff(new.get("fecha_proceso"), old.get("fecha_proceso")) <= 1:
+        score += 8
+
+    if daydiff(new.get("fecha_cita"), old.get("fecha_cita")) == 0:
+        score += 35
+    elif daydiff(new.get("fecha_cita"), old.get("fecha_cita")) <= 1:
+        score += 10
+
+    if abs((new.get("pallets") or 0) - (old.get("pallets") or 0)) < 0.000001:
+        score += 20
+    if abs((new.get("cantidad") or 0) - (old.get("cantidad") or 0)) < 0.000001:
+        score += 15
+
+    new_occ = new.get("ocurrencia_consulta") or new.get("ocurrencia_importador")
+    old_occ = old.get("ocurrencia_consulta")
+    if new_occ is not None and old_occ is not None and int(new_occ) == int(old_occ):
+        score += 25
+
+    # Si la llave base coincide exactamente, es una señal fuerte aunque la llave
+    # de embarque haya cambiado de formato por nombres de dias.
+    if norm(new.get("llave_base_consulta")) and norm(new.get("llave_base_consulta")) == norm(old.get("llave_base_consulta")):
+        score += 45
+
     return score
 
 def comparable_value(field, value):
@@ -100,34 +172,153 @@ def business_changes(new, old):
     }
 
 
-def classify(records,existing):
-    by_identity={x["identidad_normalizada"]:x for x in existing}; by_source={norm(x.get("llave_embarque_consulta")):x for x in existing if norm(x.get("llave_embarque_consulta"))}
-    used=set();result={"nuevos":[],"modificados":[],"sin_cambios":[],"ambiguos":[],"retirados":[]}
+def strict_base_key(r):
+    """Mismo proceso productivo sin usar OV ni fecha de cita, que sí pueden cambiar."""
+    fp = (r.get("fecha_proceso") or "")[:10]
+    return "|".join([
+        norm(r.get("sku")),
+        norm(r.get("lote")),
+        norm(r.get("finca")),
+        norm(r.get("destino")),
+        fp,
+    ])
+
+def classify(records, existing):
+    """
+    Conciliación conservadora:
+    1) llave canónica / llave de embarque / identidad exacta;
+    2) misma base productiva: SKU+lote+finca+destino+fecha de proceso;
+    3) desempate por OV, cantidad+pallets, cita u ocurrencia;
+    4) jamás cruza fincas, destinos o lotes solo porque coincida la OV.
+    """
+    def add_index(index, key, row):
+        if key:
+            index.setdefault(key, []).append(row)
+
+    by_identity = {}
+    by_source = {}
+    by_canonical = {}
+    by_base = {}
+    for old in existing:
+        add_index(by_identity, old.get("identidad_normalizada"), old)
+        add_index(by_source, norm(old.get("llave_embarque_consulta")), old)
+        add_index(by_canonical, canonical_key(old), old)
+        add_index(by_base, strict_base_key(old), old)
+
+    used = set()
+    result = {"nuevos": [], "modificados": [], "sin_cambios": [], "ambiguos": [], "retirados": []}
+
+    def unused(rows):
+        return [x for x in rows if x["proceso_id"] not in used]
+
+    def unique(rows):
+        rows = unused(rows)
+        return rows[0] if len(rows) == 1 else None
+
     for r in records:
-        match=None;method=None
-        if norm(r.get("llave_embarque_consulta")) in by_source:match=by_source[norm(r["llave_embarque_consulta"])];method="LLAVE_EMBARQUE"
-        elif r["identidad_normalizada"] in by_identity:match=by_identity[r["identidad_normalizada"]];method="IDENTIDAD"
-        else:
-            candidates=[]
-            for old in existing:
-                if old["proceso_id"] in used:continue
-                # Exige ancla fuerte: OV+SKU o SKU+lote.
-                strong=(norm(r.get("ov")) and norm(r.get("ov"))==norm(old.get("ov")) and norm(r["sku"])==norm(old.get("sku"))) or (norm(r.get("lote")) and norm(r.get("lote"))==norm(old.get("lote")) and norm(r["sku"])==norm(old.get("sku")))
-                if strong:candidates.append((similarity(r,old),old))
-            candidates.sort(key=lambda x:x[0],reverse=True)
-            if candidates and candidates[0][0]>=70 and (len(candidates)==1 or candidates[0][0]-candidates[1][0]>=15):match=candidates[0][1];method="CONCILIACION"
-            elif candidates and candidates[0][0]>=70:
-                result["ambiguos"].append({"nuevo":r,"candidatos":[{"puntaje":s,"proceso_id":o["proceso_id"],"finca":o.get("finca"),"destino":o.get("destino"),"pallets":o.get("pallets")} for s,o in candidates[:3]]});continue
-        if not match:result["nuevos"].append(r);continue
-        used.add(match["proceso_id"]);r["proceso_id"]=match["proceso_id"];r["metodo_coincidencia"]=method
+        match = None
+        method = None
+
+        exact_tiers = [
+            (by_canonical.get(canonical_key(r), []), "CANONICA"),
+            (by_source.get(norm(r.get("llave_embarque_consulta")), []), "LLAVE_EMBARQUE"),
+            (by_identity.get(r.get("identidad_normalizada"), []), "IDENTIDAD"),
+        ]
+        for rows, name in exact_tiers:
+            match = unique(rows)
+            if match:
+                method = name
+                break
+
+        if not match:
+            candidates = unused(by_base.get(strict_base_key(r), []))
+
+            if candidates:
+                # 1. OV exacta real.
+                ov = valid_ov(r.get("ov"))
+                if ov:
+                    rows = [x for x in candidates if valid_ov(x.get("ov")) == ov]
+                    if len(rows) == 1:
+                        match, method = rows[0], "BASE+OV"
+
+                # 2. Cantidad y pallets exactos.
+                if not match:
+                    rows = [x for x in candidates
+                            if abs((r.get("cantidad") or 0) - (x.get("cantidad") or 0)) < 0.000001
+                            and abs((r.get("pallets") or 0) - (x.get("pallets") or 0)) < 0.000001]
+                    if len(rows) == 1:
+                        match, method = rows[0], "BASE+CANTIDAD"
+
+                # 3. Fecha de cita exacta.
+                if not match:
+                    rows = [x for x in candidates if daydiff(r.get("fecha_cita"), x.get("fecha_cita")) == 0]
+                    if len(rows) == 1:
+                        match, method = rows[0], "BASE+CITA"
+
+                # 4. Si solo queda un registro con la misma base, es el mismo proceso modificado.
+                if not match and len(candidates) == 1:
+                    match, method = candidates[0], "BASE_UNICA"
+
+                if not match:
+                    # Si existen varias partidas historicas con la misma base,
+                    # pero ninguna comparte OV real, cantidad+pallets o cita exacta,
+                    # no debemos adivinar: es una partida adicional NUEVA.
+                    # Los historicos que desaparecieron se evaluaran como retirados.
+                    candidate_ovs = {valid_ov(x.get("ov")) for x in candidates if valid_ov(x.get("ov"))}
+                    new_ov = valid_ov(r.get("ov"))
+                    same_ov = bool(new_ov and new_ov in candidate_ovs)
+                    same_amount = any(
+                        abs((r.get("cantidad") or 0) - (x.get("cantidad") or 0)) < 0.000001
+                        and abs((r.get("pallets") or 0) - (x.get("pallets") or 0)) < 0.000001
+                        for x in candidates
+                    )
+                    same_appointment = any(
+                        daydiff(r.get("fecha_cita"), x.get("fecha_cita")) == 0
+                        for x in candidates
+                    )
+
+                    if len(candidates) > 1 and not same_ov and not same_amount and not same_appointment:
+                        result["nuevos"].append(r)
+                        continue
+
+                    result["ambiguos"].append({
+                        "nuevo": r,
+                        "candidatos": [{
+                            "puntaje": similarity(r, x),
+                            "proceso_id": x["proceso_id"],
+                            "ov": x.get("ov"),
+                            "sku": x.get("sku"),
+                            "lote": x.get("lote"),
+                            "finca": x.get("finca"),
+                            "destino": x.get("destino"),
+                            "cantidad": x.get("cantidad"),
+                            "pallets": x.get("pallets"),
+                            "fecha_proceso": x.get("fecha_proceso"),
+                            "fecha_cita": x.get("fecha_cita"),
+                            "ocurrencia": x.get("ocurrencia_consulta"),
+                        } for x in sorted(candidates, key=lambda x: similarity(r, x), reverse=True)[:5]]
+                    })
+                    continue
+
+        if not match:
+            # Si no comparte la base productiva exacta con un registro existente,
+            # se considera nuevo. Nunca se fusionan fincas/lotes/destinos distintos.
+            result["nuevos"].append(r)
+            continue
+
+        used.add(match["proceso_id"])
+        r["proceso_id"] = match["proceso_id"]
+        r["metodo_coincidencia"] = method
         differences = business_changes(r, match)
         if not differences:
             result["sin_cambios"].append(r)
         else:
             result["modificados"].append({"nuevo": r, "anterior": match, "cambios": differences})
-    weeks={r["semana"] for r in records}
+
+    weeks = {r["semana"] for r in records}
     for old in existing:
-        if old.get("semana") in weeks and old["proceso_id"] not in used and old.get("activo_fuente",True):result["retirados"].append(old)
+        if old.get("semana") in weeks and old["proceso_id"] not in used and old.get("activo_fuente", True):
+            result["retirados"].append(old)
     return result
 
 def fetch_existing(sb):
@@ -148,6 +339,21 @@ def main():
     sb=create_client(url,key);existing=fetch_existing(sb);changes=classify(records,existing)
     summary={"archivo":path.name,"filas_validas":len(records),"filas_rechazadas":len(rejected),"nuevos":len(changes["nuevos"]),"modificados":len(changes["modificados"]),"sin_cambios":len(changes["sin_cambios"]),"retirados":len(changes["retirados"]),"ambiguos":len(changes["ambiguos"]),"modo":"APLICAR" if args.aplicar else "VISTA_PREVIA"}
     print(json.dumps(summary,ensure_ascii=False,indent=2))
+    if changes["ambiguos"]:
+        print("\nAmbiguos detectados:")
+        for item in changes["ambiguos"][:25]:
+            nuevo=item["nuevo"]
+            print(json.dumps({
+                "fila_excel": nuevo.get("fila_excel"),
+                "sku": nuevo.get("sku"),
+                "lote": nuevo.get("lote"),
+                "finca": nuevo.get("finca"),
+                "destino": nuevo.get("destino"),
+                "fecha_proceso": nuevo.get("fecha_proceso"),
+                "fecha_cita": nuevo.get("fecha_cita"),
+                "ocurrencia": nuevo.get("ocurrencia_consulta") or nuevo.get("ocurrencia_importador"),
+                "candidatos": item.get("candidatos", []),
+            }, ensure_ascii=False, indent=2))
     if changes["modificados"]:
         print("\nCambios de muestra:")
         for item in changes["modificados"][:10]:
@@ -155,6 +361,8 @@ def main():
     if not args.aplicar:
         print("\nVista previa únicamente. Para aplicar: agrega --aplicar")
         return
+    if changes["ambiguos"]:
+        raise SystemExit(f"BLOQUEADO: quedan {len(changes['ambiguos'])} ambiguos. No se escribio nada en Supabase.")
     fh=hash_file(path)
     if sb.table("importaciones").select("id").eq("hash_archivo",fh).execute().data and not args.forzar_reimportacion:raise SystemExit("Este archivo exacto ya fue importado. Si necesitas reparar precisión, usa --forzar-reimportacion.")
     imp=sb.table("importaciones").insert({"nombre_archivo":path.name,"hash_archivo":(fh if not args.forzar_reimportacion else fh+"-REPARACION-"+datetime.now(UTC).strftime("%Y%m%d%H%M%S")),"semanas":sorted({r["semana"] for r in records}),"filas_leidas":len(records)+len(rejected),"filas_validas":len(records),"filas_nuevas":len(changes["nuevos"]),"filas_modificadas":len(changes["modificados"]),"filas_retiradas":len(changes["retirados"]),"filas_ambiguas":len(changes["ambiguos"]),"estado":"VALIDADA"}).execute().data[0]
