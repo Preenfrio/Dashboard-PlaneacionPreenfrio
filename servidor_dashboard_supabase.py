@@ -195,6 +195,12 @@ def calculate(transient_overrides=None):
             if not permitted:
                 continue
             origin = plan.get("preenfrio_manual") or suggested["origin"]
+
+            # Defensa de regresión: SMART siempre queda en NELLY, incluso si
+            # existe una asignación manual histórica a FORTALEZA.
+            if core.norm(job.get("client")) == "SMART":
+                origin = "NELLY"
+
             if origin not in permitted:
                 origin = suggested["origin"] if suggested["origin"] in permitted else permitted[0]
 
@@ -281,7 +287,7 @@ def serialise(rows, cycles):
     return {
         "ok": True,
         "source": "SUPABASE",
-        "version": "2.5.3",
+        "version": "2.5.4",
         "data": [
             {field: json_value(row.get(field)) for field in row_fields}
             for row in rows
@@ -408,7 +414,7 @@ class Handler(core.H):
 
 
 if __name__ == "__main__":
-    print(f"Planeador Supabase V2.5.3: http://{HOST}:{PORT}")
+    print(f"Planeador Supabase V2.5.4: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()

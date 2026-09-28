@@ -232,17 +232,24 @@ def read_jobs():
 
 
 def allowed(job):
+    """Devuelve las cámaras permitidas según las reglas operativas vigentes.
+
+    SMART tiene prioridad global sobre la restricción por finca: cualquier
+    proceso cuyo cliente sea SMART se procesa exclusivamente en NELLY.
+    """
     farm = norm(job.get("farm"))
     client = norm(job.get("client"))
     options = job.get("cycle_options") or {}
     enabled = {origin: hours(options.get(origin, 0)) > 0 for origin in CAP}
 
+    # Regla global aprobada: todos los SMART van a PREENFRÍO NELLY.
+    if client == "SMART":
+        return ["NELLY"] if enabled["NELLY"] else []
+
     if farm.startswith("A01 003") or "DOÑA NELLY" in farm or "DONA NELLY" in farm:
         return ["NELLY"] if enabled["NELLY"] else []
     if farm.startswith("A01 002") or farm == "FORTALEZA" or "A01 002 FORTALEZA" in farm:
         return ["FORTALEZA"] if enabled["FORTALEZA"] else []
-    if client == "SMART":
-        return ["NELLY"] if enabled["NELLY"] else []
     return [origin for origin in ("NELLY", "FORTALEZA") if enabled[origin]]
 
 
