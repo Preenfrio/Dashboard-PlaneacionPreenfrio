@@ -111,12 +111,37 @@ def get_or_create_process(sb,r,impid):
         pid=rows[0]["id"]; sb.table("procesos").update({"activo_fuente":True,"estado_sincronizacion":"NUEVO","ultima_importacion_id":impid}).eq("id",pid).execute(); return pid
     return sb.table("procesos").insert({"identidad_normalizada":r["identidad_normalizada"],"activo_fuente":True,"estado_sincronizacion":"NUEVO","primera_importacion_id":impid,"ultima_importacion_id":impid}).execute().data[0]["id"]
 
+def ensure_version(sb,pid,impid,tipo_cambio,datos_nuevos,datos_anteriores=None):
+    """Crea una sola versión por proceso/importación/tipo y calcula el número siguiente.
+
+    Hace idempotente la recuperación de importaciones parciales: si la misma
+    versión ya se escribió antes del error, no vuelve a insertarla.
+    """
+    existing=(sb.table("procesos_versiones").select("proceso_id,version_numero")
+        .eq("proceso_id",pid).eq("importacion_id",impid)
+        .eq("tipo_cambio",tipo_cambio).limit(1).execute().data)
+    if existing:
+        return existing[0]["version_numero"]
+    versions=(sb.table("procesos_versiones").select("version_numero")
+        .eq("proceso_id",pid).order("version_numero",desc=True)
+        .limit(1).execute().data)
+    version_number=(int(versions[0]["version_numero"]) if versions else 0)+1
+    record={"proceso_id":pid,"importacion_id":impid,"version_numero":version_number,
+            "tipo_cambio":tipo_cambio,"datos_nuevos":datos_nuevos}
+    if datos_anteriores is not None:
+        record["datos_anteriores"]=datos_anteriores
+    sb.table("procesos_versiones").insert(record).execute()
+    return version_number
+
 def ensure_children(sb,r,pid,impid,path):
     payload=source_payload(r,pid,path)
-    if sb.table("procesos_fuente").select("proceso_id").eq("proceso_id",pid).limit(1).execute().data: sb.table("procesos_fuente").update(payload).eq("proceso_id",pid).execute()
-    else: sb.table("procesos_fuente").insert(payload).execute()
-    if not sb.table("procesos_planificacion").select("proceso_id").eq("proceso_id",pid).limit(1).execute().data: sb.table("procesos_planificacion").insert({"proceso_id":pid}).execute()
-    if not sb.table("procesos_versiones").select("proceso_id").eq("proceso_id",pid).eq("importacion_id",impid).eq("tipo_cambio","NUEVO").limit(1).execute().data: sb.table("procesos_versiones").insert({"proceso_id":pid,"importacion_id":impid,"version_numero":1,"tipo_cambio":"NUEVO","datos_nuevos":payload}).execute()
+    if sb.table("procesos_fuente").select("proceso_id").eq("proceso_id",pid).limit(1).execute().data:
+        sb.table("procesos_fuente").update(payload).eq("proceso_id",pid).execute()
+    else:
+        sb.table("procesos_fuente").insert(payload).execute()
+    if not sb.table("procesos_planificacion").select("proceso_id").eq("proceso_id",pid).limit(1).execute().data:
+        sb.table("procesos_planificacion").insert({"proceso_id":pid}).execute()
+    ensure_version(sb,pid,impid,"NUEVO",payload)
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("excel"); ap.add_argument("--aplicar",action="store_true"); ap.add_argument("--forzar-reimportacion",action="store_true"); args=ap.parse_args(); path=Path(args.excel)
@@ -134,8 +159,12 @@ def main():
     try:
         for r in changes["nuevos"]: pid=get_or_create_process(sb,r,imp["id"]); ensure_children(sb,r,pid,imp["id"],path)
         for item in changes["modificados"]:
-            r,o=item["nuevo"],item["anterior"]; pid=r["proceso_id"]; versions=sb.table("procesos_versiones").select("version_numero").eq("proceso_id",pid).order("version_numero",desc=True).limit(1).execute().data; vn=(versions[0]["version_numero"] if versions else 0)+1; data=source_payload(r,pid,path)
-            sb.table("procesos_versiones").insert({"proceso_id":pid,"importacion_id":imp["id"],"version_numero":vn,"tipo_cambio":"MODIFICADO","datos_anteriores":o,"datos_nuevos":data}).execute(); sb.table("procesos_fuente").update(data).eq("proceso_id",pid).execute(); sb.table("procesos").update({"activo_fuente":True,"estado_sincronizacion":"MODIFICADO","ultima_importacion_id":imp["id"]}).eq("id",pid).execute()
+            r,o=item["nuevo"],item["anterior"]
+            pid=r["proceso_id"]
+            data=source_payload(r,pid,path)
+            ensure_version(sb,pid,imp["id"],"MODIFICADO",data,o)
+            sb.table("procesos_fuente").update(data).eq("proceso_id",pid).execute()
+            sb.table("procesos").update({"activo_fuente":True,"estado_sincronizacion":"MODIFICADO","ultima_importacion_id":imp["id"]}).eq("id",pid).execute()
         for r in changes["sin_cambios"]: sb.table("procesos").update({"activo_fuente":True,"estado_sincronizacion":"SIN_CAMBIOS","ultima_importacion_id":imp["id"]}).eq("id",r["proceso_id"]).execute()
         for o in changes["retirados"]: sb.table("procesos").update({"activo_fuente":False,"estado_sincronizacion":"RETIRADO_ORIGEN","ultima_importacion_id":imp["id"]}).eq("id",o["proceso_id"]).execute()
         sb.table("importaciones").update({"estado":"APLICADA","aplicado_en":datetime.now(UTC).isoformat()}).eq("id",imp["id"]).execute()
