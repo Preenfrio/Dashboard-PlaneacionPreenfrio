@@ -75,32 +75,123 @@ def fetch_existing(sb):
     return out
 
 def classify(records,existing):
+    """Clasifica registros protegiendo la identidad de origen.
+
+    Precedencia:
+    1. Llave_Embarque_Consulta exacta, cuando viene informada.
+       - Una coincidencia exacta conserva el proceso.
+       - Sin coincidencia exacta se clasifica como NUEVO.
+       - Nunca baja a conciliacion aproximada contra otras ocurrencias.
+    2. Sin llave de embarque: identidad CANON exacta.
+    3. Sin llave de embarque: conciliacion por base productiva estricta.
+    """
     byid={}; bysource={}; bybase={}
     for x in existing:
         byid.setdefault(x.get("identidad_normalizada"),[]).append(x)
-        if norm(x.get("llave_embarque_consulta")): bysource.setdefault(norm(x.get("llave_embarque_consulta")),[]).append(x)
+        source_key=norm(x.get("llave_embarque_consulta"))
+        if source_key:
+            bysource.setdefault(source_key,[]).append(x)
         bybase.setdefault(strict_base_key(x),[]).append(x)
-    used=set(); result={"nuevos":[],"modificados":[],"sin_cambios":[],"ambiguos":[],"retirados":[]}
+
+    used=set()
+    result={"nuevos":[],"modificados":[],"sin_cambios":[],"ambiguos":[],"retirados":[]}
+
     for r in records:
         match=None; method=None
-        for rows,name in ((byid.get(r["identidad_normalizada"],[]),"IDENTIDAD"),(bysource.get(norm(r.get("llave_embarque_consulta")),[]),"LLAVE_EMBARQUE")):
-            rows=[x for x in rows if x["proceso_id"] not in used]
-            if len(rows)==1: match,method=rows[0],name; break
+        source_key=norm(r.get("llave_embarque_consulta"))
+
+        # Una llave de embarque valida es la identidad autoritativa.
+        # Si no existe exactamente en Supabase, es una partida nueva;
+        # no debe compararse contra otras ocurrencias parecidas.
+        if source_key:
+            all_source_matches=bysource.get(source_key,[])
+            available_source_matches=[
+                x for x in all_source_matches
+                if x["proceso_id"] not in used
+            ]
+
+            if len(available_source_matches)==1:
+                match=available_source_matches[0]
+                method="LLAVE_EMBARQUE"
+            elif len(available_source_matches)>1:
+                result["ambiguos"].append({
+                    "nuevo":r,
+                    "motivo":"LLAVE_EMBARQUE_DUPLICADA_EN_SUPABASE",
+                    "candidatos":available_source_matches[:5],
+                })
+                continue
+            elif all_source_matches:
+                result["ambiguos"].append({
+                    "nuevo":r,
+                    "motivo":"LLAVE_EMBARQUE_REPETIDA_EN_ARCHIVO_ACTUAL",
+                    "candidatos":all_source_matches[:5],
+                })
+                continue
+            else:
+                result["nuevos"].append(r)
+                continue
+
+        # Solo los registros sin llave de embarque pueden usar CANON
+        # y la conciliacion aproximada por base productiva.
         if not match:
-            candidates=[x for x in bybase.get(strict_base_key(r),[]) if x["proceso_id"] not in used]
+            identity_matches=[
+                x for x in byid.get(r["identidad_normalizada"],[])
+                if x["proceso_id"] not in used
+            ]
+            if len(identity_matches)==1:
+                match=identity_matches[0]
+                method="IDENTIDAD"
+            elif len(identity_matches)>1:
+                result["ambiguos"].append({
+                    "nuevo":r,
+                    "motivo":"IDENTIDAD_CANON_DUPLICADA",
+                    "candidatos":identity_matches[:5],
+                })
+                continue
+
+        if not match:
+            candidates=[
+                x for x in bybase.get(strict_base_key(r),[])
+                if x["proceso_id"] not in used
+            ]
             if candidates:
-                ov=valid_ov(r.get("ov")); tests=[(lambda x:bool(ov and valid_ov(x.get("ov"))==ov),"BASE+OV"),(lambda x:abs((r.get("cantidad") or 0)-(x.get("cantidad") or 0))<1e-6 and abs((r.get("pallets") or 0)-(x.get("pallets") or 0))<1e-6,"BASE+CANTIDAD"),(lambda x:daydiff(r.get("fecha_cita"),x.get("fecha_cita"))==0,"BASE+CITA")]
+                ov=valid_ov(r.get("ov"))
+                tests=[
+                    (lambda x:bool(ov and valid_ov(x.get("ov"))==ov),"BASE+OV"),
+                    (lambda x:abs((r.get("cantidad") or 0)-(x.get("cantidad") or 0))<1e-6 and abs((r.get("pallets") or 0)-(x.get("pallets") or 0))<1e-6,"BASE+CANTIDAD"),
+                    (lambda x:daydiff(r.get("fecha_cita"),x.get("fecha_cita"))==0,"BASE+CITA"),
+                ]
                 for test,name in tests:
                     rows=[x for x in candidates if test(x)]
-                    if len(rows)==1: match,method=rows[0],name; break
-                if not match and len(candidates)==1: match,method=candidates[0],"BASE_UNICA"
-                if not match: result["ambiguos"].append({"nuevo":r,"candidatos":candidates[:5]}); continue
-        if not match: result["nuevos"].append(r); continue
-        used.add(match["proceso_id"]); r.update(proceso_id=match["proceso_id"],metodo_coincidencia=method); diff=business_changes(r,match)
-        result["modificados" if diff else "sin_cambios"].append({"nuevo":r,"anterior":match,"cambios":diff} if diff else r)
+                    if len(rows)==1:
+                        match,method=rows[0],name
+                        break
+                if not match and len(candidates)==1:
+                    match,method=candidates[0],"BASE_UNICA"
+                if not match:
+                    result["ambiguos"].append({"nuevo":r,"candidatos":candidates[:5]})
+                    continue
+
+        if not match:
+            result["nuevos"].append(r)
+            continue
+
+        used.add(match["proceso_id"])
+        r.update(proceso_id=match["proceso_id"],metodo_coincidencia=method)
+        diff=business_changes(r,match)
+        result["modificados" if diff else "sin_cambios"].append(
+            {"nuevo":r,"anterior":match,"cambios":diff} if diff else r
+        )
+
     weeks={r["semana"] for r in records}
-    result["retirados"]=[x for x in existing if x.get("semana") in weeks and x["proceso_id"] not in used and x.get("activo_fuente",True)]
+    result["retirados"]=[
+        x for x in existing
+        if x.get("semana") in weeks
+        and x["proceso_id"] not in used
+        and x.get("activo_fuente",True)
+    ]
     return result
+
 
 def source_payload(r,pid,path):
     d={k:r.get(k) for k in SOURCE_FIELDS}; d.update(proceso_id=pid,archivo_origen=path.name,datos_extra={"fila_excel":r.get("fila_excel"),"ocurrencia_importador":r.get("ocurrencia_importador")}); return d
