@@ -5,3 +5,5 @@ sincronizacion_planeacion.log
 __pycache__/
 *.py[cod]
 *.diff
+diagnosticar_ambiguo_actual.py
+diagnostico_ambiguo_actual.json
