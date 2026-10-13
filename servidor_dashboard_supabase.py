@@ -15,6 +15,7 @@ import pandas as pd
 from supabase import create_client
 
 import servidor_dashboard_v2 as core
+import cierres_runtime
 
 HOST = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
 PORT = int(os.environ.get("PORT", "8010"))
@@ -107,7 +108,8 @@ def load_jobs_and_plan():
     return jobs, plans
 
 
-def fast_automatic(jobs):
+def fast_automatic(jobs, initial_clocks=None):
+    initial_clocks = initial_clocks or {"NELLY": None, "FORTALEZA": None}
     queues = {"NELLY": [], "FORTALEZA": []}
     assignments = {}
     ordered = sorted(
@@ -123,7 +125,7 @@ def fast_automatic(jobs):
     for job in ordered:
         best = None
         for origin in core.allowed(job):
-            rows, cycles = core.pack(origin, queues[origin] + [job])
+            rows, cycles = core.pack(origin, queues[origin] + [job], initial_clocks.get(origin))
             candidate = next(row for row in rows if row["key"] == job["key"])
             protected_late = sum(
                 row["status"] == "NO CUMPLE" and row.get("critical", 99) <= 4
@@ -162,8 +164,11 @@ def calculate(transient_overrides=None):
     volver a leer la base para reflejar el nuevo orden.
     """
     jobs, plans = load_jobs_and_plan()
+    cierre = cierres_runtime.obtener_ultimo_cierre(DB)
+    jobs = cierres_runtime.filtrar_semanas_cerradas(jobs, cierre)
+    initial_clocks = cierres_runtime.relojes_iniciales(cierre)
     transient_overrides = transient_overrides or {}
-    automatic_assignments = fast_automatic(jobs)
+    automatic_assignments = fast_automatic(jobs, initial_clocks)
     queues = {"NELLY": [], "FORTALEZA": []}
     direct = []
 
@@ -217,7 +222,7 @@ def calculate(transient_overrides=None):
 
     rows, cycles = [], []
     for origin in ("NELLY", "FORTALEZA"):
-        packed_rows, packed_cycles = core.pack(origin, queues[origin])
+        packed_rows, packed_cycles = core.pack(origin, queues[origin], initial_clocks.get(origin))
         rows.extend(packed_rows)
         cycles.extend(packed_cycles)
 
@@ -282,7 +287,7 @@ def serialise(rows, cycles):
     return {
         "ok": True,
         "source": "SUPABASE",
-        "version": "2.6.0",
+        "version": "2.7.0",
         "data": [
             {field: json_value(row.get(field)) for field in row_fields}
             for row in rows
@@ -409,7 +414,7 @@ class Handler(core.H):
 
 
 if __name__ == "__main__":
-    print(f"Planeador Supabase V2.6.0: http://{HOST}:{PORT}")
+    print(f"Planeador Supabase V2.7.0: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()

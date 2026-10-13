@@ -342,8 +342,12 @@ def local_fillers(pending, remaining, current, origin, excluded_keys=None):
     ]
 
 
-def pack(origin, sequence):
-    """FIFO diario, prioridad normal y relleno excepcional con finca local."""
+def pack(origin, sequence, initial_time=None):
+    """FIFO diario, prioridad normal y relleno excepcional con finca local.
+
+    initial_time establece el primer instante disponible de la cámara. Si no
+    existe un cierre semanal, conserva exactamente el comportamiento anterior.
+    """
     if not sequence:
         return [], []
 
@@ -351,7 +355,11 @@ def pack(origin, sequence):
     remaining = {job["key"]: float(job["pallets"]) for job in sequence}
     first, last, portions, cycles = {}, {}, {}, []
     pending = list(sequence)
-    current = min(release_time(job) for job in pending)
+    first_release = min(release_time(job) for job in pending)
+    # Con cierre semanal, el reloj empieza exactamente cuando la cámara quedó
+    # disponible. Desde ahí puede aprovechar fruta de su propia finca antes de
+    # las 19:00; si no existe fruta local elegible, saltará a la liberación normal.
+    current = initial_time if initial_time else first_release
 
     while pending:
         available = [
@@ -676,7 +684,7 @@ def serial(rows, cycles):
     ]
     return {
         "ok": True,
-        "version": "2.6.0",
+        "version": "2.7.0",
         "excel": EXCEL.name,
         "modified": datetime.fromtimestamp(EXCEL.stat().st_mtime).isoformat(timespec="seconds"),
         "data": [
@@ -783,7 +791,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Planeador V2.6.0: http://{HOST}:{PORT}")
+    print(f"Planeador V2.7.0: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), H)
     if HOST == "127.0.0.1":
         threading.Timer(0.6, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
