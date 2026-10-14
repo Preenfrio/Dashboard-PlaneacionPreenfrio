@@ -544,27 +544,11 @@
         }
 
 
-        /* DIRECTO_DINAMICO_V1 */
-        .direct.hidden-by-filters { display: none !important; }
-        .direct-table-scroll {
-            max-height: 330px;
-            overflow: auto;
-            border: 1px solid #fed7aa;
-            border-radius: 9px;
-            scrollbar-gutter: stable;
-        }
-        .direct-table-scroll table { margin: 0; }
-        .direct-table-scroll th {
-            position: sticky;
-            top: 0;
-            z-index: 2;
-        }
-        .direct-summary {
-            margin: -4px 0 10px;
-            color: #7c2d12;
-            font-size: 12px;
-            font-weight: 700;
-        }
+        /* HISTORICO_SEMANAS_CERRADAS_V1 */
+        .closedBanner{display:none;margin:-2px 0 13px;padding:12px 16px;border-radius:11px;background:#fff7d6;border:1px solid #e6b84a;color:#694a00;font-weight:800;align-items:center;justify-content:space-between;gap:16px}
+        .closedBanner.show{display:flex}.closedBadge{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border-radius:999px;background:#7a5600;color:#fff;font-size:11px;letter-spacing:.3px}
+        .historyTableWrap{overflow:auto;max-height:610px}.historyTable{width:100%;border-collapse:collapse;background:#fff}.historyTable th{position:sticky;top:0;background:#6b5200;color:#fff;padding:10px;text-align:left;z-index:2}.historyTable td{padding:9px 10px;border-bottom:1px solid #eadfbd}.historyTable tr:nth-child(even){background:#fffaf0}.historyMuted{color:#7b6d51}.closedOption{color:#7a5600;font-weight:700}
+        body.closed-mode #importBtn{display:none}.closedReadonly{display:inline-block;padding:5px 9px;border-radius:7px;background:#f4ead0;color:#6b5200;font-weight:800}
 
 </style>
 </head>
@@ -622,72 +606,35 @@
                 id="importBtn">↑ Importar plan</button><button class="btn" id="exportBtn">↓ Exportar
                 Excel</button><input hidden id="importFile" type="file" accept=".xlsx">
         </section>
+        <section id="closedBanner" class="closedBanner">
+            <div><span class="closedBadge">🔒 SOLO CONSULTA</span> <span id="closedText">Semana cerrada</span></div>
+            <div id="closedClocks"></div>
+        </section>
         <section class="card">
             <div class="tabs"><button class="tab active" data-tab="dispatch">Cola de despachos</button><button class="tab" data-tab="cycles">Detalle de ciclos y espera</button></div>
             <div class="scroll">
                 <div id="view">Cargando...</div>
             </div>
         </section>
-        <section class="card direct" id="directSection">
+        <section class="card direct">
             <h2>Plan de contingencia · Directo sin preenfrío</h2>
             <div id="directView">Sin procesos asignados.</div>
         </section>
     </main>
     <div id="tip" class="tipbox"></div>
     <script>
-        let DATA = [], CYC = [], OV = {}, TAB = 'dispatch';
+        let DATA = [], ACTIVE_DATA = [], HIST_DATA = [], CYC = [], CLOSURES = [], OV = {}, TAB = 'dispatch';
         const $ = id => document.getElementById(id), D = x => new Date(x), N = x => Number(x) || 0, K = x => String(x).slice(0, 10), fmt = x => D(x).toLocaleString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }), fd = x => D(x).toLocaleDateString('es-MX');
         function selectedDates() { return [...document.querySelectorAll('.dc:checked')].map(x => x.value) } function opts(id, v, p = '') { const e = $(id), first = e.options[0].outerHTML, old = e.value; e.innerHTML = first + [...new Set(v)].sort().map(x => `<option value="${x}">${p}${x}</option>`).join(''); if ([...e.options].some(x => x.value === old)) e.value = old } function buildDates() { const old = new Set(selectedDates()), ds = [...new Set(DATA.map(x => K(x.process_date)))].sort(); $('dateChecks').innerHTML = ds.map(d => `<label><input class="dc" type="checkbox" value="${d}" ${!old.size || old.has(d) ? 'checked' : ''}> ${d.split('-').reverse().join('/')}</label>`).join(''); document.querySelectorAll('.dc').forEach(x => x.onchange = render); updateDateLabel() } function updateDateLabel() { const n = selectedDates().length, t = document.querySelectorAll('.dc').length; $('dateBtn').textContent = n === t ? 'Todas las fechas' : n === 0 ? 'Ninguna fecha' : n === 1 ? selectedDates()[0].split('-').reverse().join('/') : n + ' fechas seleccionadas' } function applyPayload(p) { DATA = p.data; CYC = p.cycles; buildDates(); opts('week', DATA.map(x => x.week), 'Semana '); opts('dest', DATA.map(x => x.destination)); $('updated').textContent = 'Última actualización: ' + new Date().toLocaleString('es-MX'); render() } async function load() { const p = await (await fetch('/api/datos?t=' + Date.now())).json(); if (!p.ok) throw Error(p.error); OV = {}; applyPayload(p) }
-        function visibleRows() { const ds = selectedDates(), w = $('week').value, z = $('dest').value, o = $('origin').value, s = $('state').value; return DATA.filter(x => (!ds.length || ds.includes(K(x.process_date))) && (!w || x.week === w) && (!z || x.destination === z) && (!o || x.assigned_origin === o) && (!s || x.status === s)) } function occupancy(a, o) { const c = CYC.filter(x => x.origin === o && a.some(r => K(r.process_date) === K(x.process_date) && r.assigned_origin === o)); return c.length ? c.reduce((s, x) => s + N(x.used_pallets) / N(x.capacity) * 100, 0) / c.length : 0 } async function replan() { $('updated').textContent = 'Guardando cambio manual...'; try { const response = await fetch('/api/replan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ overrides: OV }) }); const p = await response.json(); if (!response.ok || !p.ok) throw Error(p.error || 'No se pudo guardar el cambio manual'); applyPayload(p); $('updated').textContent = 'Cambio manual guardado · ' + new Date().toLocaleString('es-MX'); } catch (error) { alert('No se guardó el cambio manual: ' + error.message); $('updated').textContent = 'Error al guardar cambio manual'; await load(); } } function setOrigin(x, v) { if (x.client === 'SMART' && v === 'FORTALEZA') { alert('Regla operativa: todos los SMART se preenfrían en NELLY.'); render(); return } if (v === 'DIRECTO SIN PREENFRIO' && !confirm('¿Asignar ' + x.destination + ' como contingencia directa?')) { render(); return } OV[x.key] = { ...(OV[x.key] || {}), origin: v, order: x.order }; replan() } function move(x, d) { if (x.assigned_origin === 'DIRECTO SIN PREENFRIO') return; const p = DATA.filter(r => K(r.process_date) === K(x.process_date) && r.assigned_origin === x.assigned_origin).sort((a, b) => a.order - b.order), i = p.findIndex(r => r.key === x.key), j = i + d; if (j < 0 || j >= p.length) return; p.forEach((r, k) => OV[r.key] = { ...(OV[r.key] || {}), origin: r.assigned_origin, order: k + 1 });[OV[p[i].key].order, OV[p[j].key].order] = [OV[p[j].key].order, OV[p[i].key].order]; replan() }
-        function tooltip(x) { return `<h3>${x.destination}</h3><div class="tiprow"><span>Finca:</span><b>${x.farm || ''}</b></div><div class="tiprow"><span>Cliente:</span><b>${x.client}</b></div><div class="tiprow"><span>Asignación:</span><b>${x.assigned_origin}</b></div><div class="tiprow"><span>Despacho:</span><b>${fmt(x.end)}</b></div><div class="tiprow"><span>${x.slack_h < 0 ? 'Retraso' : 'Holgura'}:</span><b>${Math.abs(x.slack_h).toFixed(1)} h</b></div>` } function bind() { document.querySelectorAll('.bar').forEach(b => { b.onmouseenter = () => { $('tip').innerHTML = tooltip(DATA.find(x => x.key === b.dataset.key)); $('tip').style.display = 'block' }; b.onmousemove = e => { $('tip').style.left = Math.min(innerWidth - 305, e.clientX + 14) + 'px'; $('tip').style.top = Math.min(innerHeight - $('tip').offsetHeight - 10, e.clientY + 14) + 'px' }; b.onmouseleave = () => $('tip').style.display = 'none' }); document.querySelectorAll('.originEdit').forEach(e => e.onchange = () => setOrigin(DATA.find(x => x.key === e.dataset.key), e.value)); document.querySelectorAll('.move').forEach(e => e.onclick = () => move(DATA.find(x => x.key === e.dataset.key), N(e.dataset.delta))) } function directTable() {
-            const section = $('directSection');
-            const dates = selectedDates();
-            const week = String($('week').value || '');
-            const destination = $('dest').value;
-            const origin = $('origin').value;
-            const state = $('state').value;
-
-            // Si el usuario pidió específicamente una cámara, contingencia no
-            // corresponde al filtro y la tarjeta se oculta completamente.
-            if (origin && origin !== 'DIRECTO SIN PREENFRIO') {
-                section.classList.add('hidden-by-filters');
-                $('directView').innerHTML = '';
-                return;
-            }
-
-            const rows = DATA.filter(item =>
-                item.assigned_origin === 'DIRECTO SIN PREENFRIO' &&
-                (!dates.length || dates.includes(K(item.process_date))) &&
-                (!week || String(item.week) === week) &&
-                (!destination || item.destination === destination) &&
-                (!state || item.status === state)
-            ).sort((a, b) =>
-                String(a.process_date).localeCompare(String(b.process_date)) ||
-                String(a.destination).localeCompare(String(b.destination)) ||
-                String(a.farm || '').localeCompare(String(b.farm || ''))
-            );
-
-            if (!rows.length) {
-                section.classList.add('hidden-by-filters');
-                $('directView').innerHTML = '';
-                return;
-            }
-
-            section.classList.remove('hidden-by-filters');
-            const totalPallets = rows.reduce((sum, item) => sum + N(item.pallets), 0);
-            const summary = `<div class="direct-summary">${rows.length} proceso${rows.length === 1 ? '' : 's'} visible${rows.length === 1 ? '' : 's'} · ${totalPallets.toFixed(1)} tarimas</div>`;
-            const table = '<div class="direct-table-scroll"><table><thead><tr><th>Fecha</th><th>Finca</th><th>Cliente</th><th>Destino</th><th>Tarimas</th><th>Despacho</th><th>Llegada</th><th>Cita</th><th>Estado</th></tr></thead><tbody>' +
-                rows.map(item => `<tr><td>${fd(item.process_date)}</td><td>${item.farm || ''}</td><td>${item.client}</td><td>${item.destination}</td><td>${N(item.pallets).toFixed(1)}</td><td>${fmt(item.end)}</td><td>${fmt(item.arrival)}</td><td>${fd(item.appointment)}</td><td class="${item.status === 'CUMPLE' ? 'ok' : 'bad'}">${item.status}</td></tr>`).join('') +
-                '</tbody></table></div>';
-            $('directView').innerHTML = summary + table;
-        }
-        function renderDispatch() { updateDateLabel(); const a = visibleRows(); $('jobs').textContent = a.length; $('yes').textContent = a.filter(x => x.status === 'CUMPLE').length; $('no').textContent = a.filter(x => x.status === 'NO CUMPLE').length; $('nelly').textContent = occupancy(a, 'NELLY').toFixed(1) + '%'; $('fort').textContent = occupancy(a, 'FORTALEZA').toFixed(1) + '%'; $('np').textContent = a.filter(x => x.assigned_origin === 'NELLY').reduce((s, x) => s + N(x.pallets), 0).toFixed(1) + ' tarimas · cap. 12'; $('fp').textContent = a.filter(x => x.assigned_origin === 'FORTALEZA').reduce((s, x) => s + N(x.pallets), 0).toFixed(1) + ' tarimas · cap. 10'; $('cycles').textContent = CYC.length; directTable(); if (!a.length) { $('view').textContent = 'Sin datos'; return } const s0 = new Date(Math.min(...a.map(x => +D(x.start)))), s1 = new Date(Math.max(...a.map(x => Math.max(+D(x.end), +D(x.appointment))))); s0.setHours(0, 0, 0, 0); s1.setHours(0, 0, 0, 0); s1.setDate(s1.getDate() + 1); const span = s1 - s0, pos = x => (+D(x) - s0) / span * 100, dw = 864e5 / span * 100, days = []; for (let q = new Date(s0); q < s1; q.setDate(q.getDate() + 1))days.push(new Date(q)); const L = ['D', 'L', 'M', 'M', 'J', 'V', 'S'], scale = '<div class="days" style="--dw:' + dw + '%">' + days.map(x => `<span>${L[x.getDay()]}<small>${x.getDate()}/${x.getMonth() + 1}</small></span>`).join('') + '</div>'; let h = '<div class="grid"><div class="head"><span>Fecha</span><span>Orden</span><span>Finca</span><span>Cliente</span><span>Destino</span><span>Preenfrío</span><span>Tarimas</span><span>Cita</span><span>Ingreso</span><span>Despacho</span><span>Estado</span><span class="timeHead"><b class="timeTitle">Línea de tiempo</b>' + scale + '</span></div>'; for (const x of a.sort((x, y) => x.process_date.localeCompare(y.process_date) || x.assigned_origin.localeCompare(y.assigned_origin) || x.order - y.order)) { const direct = x.assigned_origin === 'DIRECTO SIN PREENFRIO', late = x.status === 'NO CUMPLE', cl = late ? 'late' : x.assigned_origin === 'NELLY' ? 'n' : 'f'; h += `<div class="row ${late ? 'late' : ''}"><span>${fd(x.process_date)}</span><span class="orderBtns"><button class="move" data-key="${x.key}" data-delta="-1" ${direct ? 'disabled' : ''}>▲</button><b>${direct ? '—' : x.order}</b><button class="move" data-key="${x.key}" data-delta="1" ${direct ? 'disabled' : ''}>▼</button></span><span>${x.farm || ''}</span><span>${x.client}</span><span>${x.destination}</span><select class="originEdit" data-key="${x.key}"><option ${x.assigned_origin === 'NELLY' ? 'selected' : ''}>NELLY</option><option ${x.assigned_origin === 'FORTALEZA' ? 'selected' : ''} ${x.client === 'SMART' ? 'disabled' : ''}>FORTALEZA</option><option ${direct ? 'selected' : ''}>DIRECTO SIN PREENFRIO</option></select><span>${N(x.pallets).toFixed(1)}</span><span>${fd(x.appointment)}</span><span>${fmt(x.start)}</span><span>${fmt(x.end)}</span><span class="${late ? 'bad' : 'ok'}">${x.status}</span><div class="track" style="--dw:${dw}%">${direct ? '' : `<i class="bar ${cl}" data-key="${x.key}" style="left:${pos(x.start)}%;width:${Math.max(.4, pos(x.end) - pos(x.start))}%"></i>`}<i class="appt" style="left:${pos(x.appointment)}%"></i></div></div>` } $('view').innerHTML = h + '</div>'; bind() }
+        function visibleRows() { const ds = selectedDates(), w = $('week').value, z = $('dest').value, o = $('origin').value, s = $('state').value; return DATA.filter(x => (!ds.length || ds.includes(K(x.process_date))) && (!w || x.week === w) && (!z || x.destination === z) && (!o || x.assigned_origin === o) && (!s || x.status === s)) } function occupancy(a, o) { const c = CYC.filter(x => x.origin === o && a.some(r => K(r.process_date) === K(x.process_date) && r.assigned_origin === o)); return c.length ? c.reduce((s, x) => s + N(x.used_pallets) / N(x.capacity) * 100, 0) / c.length : 0 } async function replan() { $('updated').textContent = 'Guardando cambio manual...'; try { const response = await fetch('/api/replan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ overrides: OV }) }); const p = await response.json(); if (!response.ok || !p.ok) throw Error(p.error || 'No se pudo guardar el cambio manual'); applyPayload(p); $('updated').textContent = 'Cambio manual guardado · ' + new Date().toLocaleString('es-MX'); } catch (error) { alert('No se guardó el cambio manual: ' + error.message); $('updated').textContent = 'Error al guardar cambio manual'; await load(); } } function setOriginActivoBase(x, v) { if (x.client === 'SMART' && v === 'FORTALEZA') { alert('Regla operativa: todos los SMART se preenfrían en NELLY.'); render(); return } if (v === 'DIRECTO SIN PREENFRIO' && !confirm('¿Asignar ' + x.destination + ' como contingencia directa?')) { render(); return } OV[x.key] = { ...(OV[x.key] || {}), origin: v, order: x.order }; replan() } function moveActivoBase(x, d) { if (x.assigned_origin === 'DIRECTO SIN PREENFRIO') return; const p = DATA.filter(r => K(r.process_date) === K(x.process_date) && r.assigned_origin === x.assigned_origin).sort((a, b) => a.order - b.order), i = p.findIndex(r => r.key === x.key), j = i + d; if (j < 0 || j >= p.length) return; p.forEach((r, k) => OV[r.key] = { ...(OV[r.key] || {}), origin: r.assigned_origin, order: k + 1 });[OV[p[i].key].order, OV[p[j].key].order] = [OV[p[j].key].order, OV[p[i].key].order]; replan() }
+        function tooltip(x) { return `<h3>${x.destination}</h3><div class="tiprow"><span>Finca:</span><b>${x.farm || ''}</b></div><div class="tiprow"><span>Cliente:</span><b>${x.client}</b></div><div class="tiprow"><span>Asignación:</span><b>${x.assigned_origin}</b></div><div class="tiprow"><span>Despacho:</span><b>${fmt(x.end)}</b></div><div class="tiprow"><span>${x.slack_h < 0 ? 'Retraso' : 'Holgura'}:</span><b>${Math.abs(x.slack_h).toFixed(1)} h</b></div>` } function bind() { document.querySelectorAll('.bar').forEach(b => { b.onmouseenter = () => { $('tip').innerHTML = tooltip(DATA.find(x => x.key === b.dataset.key)); $('tip').style.display = 'block' }; b.onmousemove = e => { $('tip').style.left = Math.min(innerWidth - 305, e.clientX + 14) + 'px'; $('tip').style.top = Math.min(innerHeight - $('tip').offsetHeight - 10, e.clientY + 14) + 'px' }; b.onmouseleave = () => $('tip').style.display = 'none' }); document.querySelectorAll('.originEdit').forEach(e => e.onchange = () => setOrigin(DATA.find(x => x.key === e.dataset.key), e.value)); document.querySelectorAll('.move').forEach(e => e.onclick = () => move(DATA.find(x => x.key === e.dataset.key), N(e.dataset.delta))) } function directTable() { const a = DATA.filter(x => x.assigned_origin === 'DIRECTO SIN PREENFRIO'); if (!a.length) { $('directView').textContent = 'Sin procesos asignados.'; return } $('directView').innerHTML = '<table><tr><th>Fecha</th><th>Finca</th><th>Cliente</th><th>Destino</th><th>Tarimas</th><th>Despacho</th><th>Llegada</th><th>Cita</th><th>Estado</th></tr>' + a.map(x => `<tr><td>${fd(x.process_date)}</td><td>${x.farm || ''}</td><td>${x.client}</td><td>${x.destination}</td><td>${N(x.pallets).toFixed(1)}</td><td>${fmt(x.end)}</td><td>${fmt(x.arrival)}</td><td>${fd(x.appointment)}</td><td class="${x.status === 'CUMPLE' ? 'ok' : 'bad'}">${x.status}</td></tr>`).join('') + '</table>' }
+        function renderDispatchActivoBase() { updateDateLabel(); const a = visibleRows(); $('jobs').textContent = a.length; $('yes').textContent = a.filter(x => x.status === 'CUMPLE').length; $('no').textContent = a.filter(x => x.status === 'NO CUMPLE').length; $('nelly').textContent = occupancy(a, 'NELLY').toFixed(1) + '%'; $('fort').textContent = occupancy(a, 'FORTALEZA').toFixed(1) + '%'; $('np').textContent = a.filter(x => x.assigned_origin === 'NELLY').reduce((s, x) => s + N(x.pallets), 0).toFixed(1) + ' tarimas · cap. 12'; $('fp').textContent = a.filter(x => x.assigned_origin === 'FORTALEZA').reduce((s, x) => s + N(x.pallets), 0).toFixed(1) + ' tarimas · cap. 10'; $('cycles').textContent = CYC.length; directTable(); if (!a.length) { $('view').textContent = 'Sin datos'; return } const s0 = new Date(Math.min(...a.map(x => +D(x.start)))), s1 = new Date(Math.max(...a.map(x => Math.max(+D(x.end), +D(x.appointment))))); s0.setHours(0, 0, 0, 0); s1.setHours(0, 0, 0, 0); s1.setDate(s1.getDate() + 1); const span = s1 - s0, pos = x => (+D(x) - s0) / span * 100, dw = 864e5 / span * 100, days = []; for (let q = new Date(s0); q < s1; q.setDate(q.getDate() + 1))days.push(new Date(q)); const L = ['D', 'L', 'M', 'M', 'J', 'V', 'S'], scale = '<div class="days" style="--dw:' + dw + '%">' + days.map(x => `<span>${L[x.getDay()]}<small>${x.getDate()}/${x.getMonth() + 1}</small></span>`).join('') + '</div>'; let h = '<div class="grid"><div class="head"><span>Fecha</span><span>Orden</span><span>Finca</span><span>Cliente</span><span>Destino</span><span>Preenfrío</span><span>Tarimas</span><span>Cita</span><span>Ingreso</span><span>Despacho</span><span>Estado</span><span class="timeHead"><b class="timeTitle">Línea de tiempo</b>' + scale + '</span></div>'; for (const x of a.sort((x, y) => x.process_date.localeCompare(y.process_date) || x.assigned_origin.localeCompare(y.assigned_origin) || x.order - y.order)) { const direct = x.assigned_origin === 'DIRECTO SIN PREENFRIO', late = x.status === 'NO CUMPLE', cl = late ? 'late' : x.assigned_origin === 'NELLY' ? 'n' : 'f'; h += `<div class="row ${late ? 'late' : ''}"><span>${fd(x.process_date)}</span><span class="orderBtns"><button class="move" data-key="${x.key}" data-delta="-1" ${direct ? 'disabled' : ''}>▲</button><b>${direct ? '—' : x.order}</b><button class="move" data-key="${x.key}" data-delta="1" ${direct ? 'disabled' : ''}>▼</button></span><span>${x.farm || ''}</span><span>${x.client}</span><span>${x.destination}</span><select class="originEdit" data-key="${x.key}"><option ${x.assigned_origin === 'NELLY' ? 'selected' : ''}>NELLY</option><option ${x.assigned_origin === 'FORTALEZA' ? 'selected' : ''} ${x.client === 'SMART' ? 'disabled' : ''}>FORTALEZA</option><option ${direct ? 'selected' : ''}>DIRECTO SIN PREENFRIO</option></select><span>${N(x.pallets).toFixed(1)}</span><span>${fd(x.appointment)}</span><span>${fmt(x.start)}</span><span>${fmt(x.end)}</span><span class="${late ? 'bad' : 'ok'}">${x.status}</span><div class="track" style="--dw:${dw}%">${direct ? '' : `<i class="bar ${cl}" data-key="${x.key}" style="left:${pos(x.start)}%;width:${Math.max(.4, pos(x.end) - pos(x.start))}%"></i>`}<i class="appt" style="left:${pos(x.appointment)}%"></i></div></div>` } $('view').innerHTML = h + '</div>'; bind() }
         
         function cycleRows(){
             const visibleKeys=new Set(visibleRows().map(x=>x.key));
             return CYC.filter(c=>(!$('origin').value||c.origin===$('origin').value)&&c.loads.some(l=>visibleKeys.has(l.key)));
         }
-        function renderCycles(){
+        function renderCyclesActivoBase(){
             const cs=cycleRows().sort((a,b)=>D(a.start)-D(b.start)||a.origin.localeCompare(b.origin));
             if(!cs.length){$('view').textContent='Sin ciclos para los filtros seleccionados.';return}
             let h='<div class="cycleGrid"><div class="cycleHead"><span>Fecha</span><span>Ciclo</span><span>Preenfrío</span><span>Inicio</span><span>Fin</span><span>Uso</span><span>Libre</span><span>Carga del ciclo</span></div>';
@@ -829,6 +776,86 @@
         };
 
         load();
+
+    
+        /* HISTORICO_SEMANAS_CERRADAS_V1 */
+        function selectedClosedKey(){ return String($('week').value || '').startsWith('C:') ? String($('week').value).slice(2) : ''; }
+        function selectedClosedWeek(){ const key=selectedClosedKey(); return key ? key.split('-')[1] : ''; }
+        function isClosedSelected(){ return !!selectedClosedKey(); }
+        function sourceForFilters(){ return isClosedSelected() ? HIST_DATA.filter(x => String(x.closed_year)+'-'+String(x.closed_week) === selectedClosedKey()) : ACTIVE_DATA; }
+        function closedInfo(){ const key=selectedClosedKey(); return CLOSURES.find(x => String(x.anio)+'-'+String(x.semana)===key); }
+        function safeFmt(value){ return value ? fmt(value) : 'Sin registro'; }
+        function rebuildWeekOptions(){
+            const e=$('week'), old=e.value;
+            const active=[...new Set(ACTIVE_DATA.map(x=>String(x.week)))].sort((a,b)=>N(a)-N(b));
+            const closed=[...CLOSURES].sort((a,b)=>a.anio-b.anio||a.semana-b.semana);
+            e.innerHTML='<option value="">Todas las semanas abiertas</option>'+
+                active.map(w=>`<option value="${w}">Semana ${w}</option>`).join('')+
+                (closed.length?'<option disabled>────────────</option>':'')+
+                closed.map(c=>`<option class="closedOption" value="C:${c.anio}-${c.semana}">Semana ${c.semana} · CERRADA</option>`).join('');
+            if([...e.options].some(o=>o.value===old)) e.value=old;
+        }
+        function updateClosedUI(){
+            const closed=isClosedSelected(), info=closedInfo();
+            document.body.classList.toggle('closed-mode',closed);
+            $('closedBanner').classList.toggle('show',closed);
+            if(!closed) return;
+            $('closedText').textContent=`Semana ${info?.semana || selectedClosedWeek()} cerrada · Vista histórica sin edición`;
+            $('closedClocks').textContent=info ? `Nelly: ${safeFmt(info.ultimo_fin_nelly_local)} · Fortaleza: ${safeFmt(info.ultimo_fin_fortaleza_local)}` : '';
+        }
+        function fechasDisponiblesPorSemana(){
+            const source=sourceForFilters();
+            const semana=String($('week').value||'');
+            return [...new Set(source.filter(item=>isClosedSelected() || !semana || String(item.week)===semana).map(item=>K(item.process_date)))].sort();
+        }
+        function visibleRows(){
+            const ds=selectedDates(), z=$('dest').value, o=$('origin').value, st=$('state').value;
+            const semana=String($('week').value||'');
+            return sourceForFilters().filter(x=>(!ds.length||ds.includes(K(x.process_date)))&&
+                (isClosedSelected()||!semana||String(x.week)===semana)&&(!z||x.destination===z)&&
+                (!o||x.assigned_origin===o)&&(!st||x.status===st));
+        }
+        function applyPayload(p){
+            ACTIVE_DATA=p.data||[]; HIST_DATA=p.historical_data||[]; CYC=p.cycles||[]; CLOSURES=p.closures||[];
+            DATA=[...ACTIVE_DATA,...HIST_DATA]; OV={};
+            rebuildWeekOptions();
+            opts('dest',sourceForFilters().map(x=>x.destination));
+            buildDates(); updateClosedUI();
+            $('updated').textContent='Última actualización: '+new Date().toLocaleString('es-MX');
+            render();
+        }
+        function renderHistorical(){
+            updateDateLabel(); updateClosedUI();
+            const a=visibleRows().sort((x,y)=>String(x.process_date).localeCompare(String(y.process_date))||N(x.order)-N(y.order));
+            $('jobs').textContent=a.length; $('cycles').textContent='—';
+            $('yes').textContent=a.filter(x=>x.status==='CUMPLE').length;
+            $('no').textContent=a.filter(x=>x.status==='NO CUMPLE').length;
+            $('nelly').textContent='CERRADA'; $('fort').textContent='CERRADA';
+            $('np').textContent=a.filter(x=>x.assigned_origin==='NELLY').reduce((s,x)=>s+N(x.pallets),0).toFixed(1)+' tarimas históricas';
+            $('fp').textContent=a.filter(x=>x.assigned_origin==='FORTALEZA').reduce((s,x)=>s+N(x.pallets),0).toFixed(1)+' tarimas históricas';
+            directTable();
+            if(!a.length){$('view').textContent='Sin procesos históricos para los filtros seleccionados.';return;}
+            const rows=a.map(x=>`<tr><td>${fd(x.process_date)}</td><td>${x.order||'—'}</td><td>${x.farm||''}</td><td>${x.client||''}</td><td>${x.destination||''}</td><td><span class="closedReadonly">${x.assigned_origin||'SIN REGISTRO'}</span></td><td>${N(x.pallets).toFixed(1)}</td><td>${fd(x.appointment)}</td><td>${safeFmt(x.start)}</td><td>${safeFmt(x.end)}</td><td>${x.status||'CERRADA'}</td></tr>`).join('');
+            $('view').innerHTML=`<div class="historyTableWrap"><table class="historyTable"><thead><tr><th>Fecha</th><th>Orden</th><th>Finca</th><th>Cliente</th><th>Destino</th><th>Preenfrío</th><th>Tarimas</th><th>Cita</th><th>Ingreso registrado</th><th>Despacho registrado</th><th>Estado</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        }
+        function renderDispatch(){ if(isClosedSelected()) renderHistorical(); else { updateClosedUI(); renderDispatchActivoBase(); } }
+        function renderCycles(){
+            if(isClosedSelected()){
+                updateClosedUI();
+                $('view').innerHTML='<div style="padding:28px;text-align:center"><b>Semana cerrada en modo consulta.</b><br><span class="historyMuted">Los ciclos cerrados no se recalculan. Consulta los procesos históricos en la pestaña Cola de despachos.</span></div>';
+                return;
+            }
+            return renderCyclesActivoBase();
+        }
+        function directTable(){
+            const a=visibleRows().filter(x=>x.assigned_origin==='DIRECTO SIN PREENFRIO');
+            const section=$('directView').closest('section'); section.style.display=a.length?'':'none';
+            if(!a.length){$('directView').textContent='Sin procesos asignados.';return;}
+            $('directView').innerHTML='<table><tr><th>Fecha</th><th>Finca</th><th>Cliente</th><th>Destino</th><th>Tarimas</th><th>Despacho</th><th>Llegada</th><th>Cita</th><th>Estado</th></tr>'+a.map(x=>`<tr><td>${fd(x.process_date)}</td><td>${x.farm||''}</td><td>${x.client}</td><td>${x.destination}</td><td>${N(x.pallets).toFixed(1)}</td><td>${safeFmt(x.end)}</td><td>${safeFmt(x.arrival)}</td><td>${fd(x.appointment)}</td><td>${x.status||'CERRADA'}</td></tr>`).join('')+'</table>';
+        }
+        function setOrigin(x,v){ if(isClosedSelected()||x?.read_only){alert('Semana cerrada: disponible únicamente para consulta.');render();return;} return setOriginActivoBase(x,v); }
+        function move(x,d){ if(isClosedSelected()||x?.read_only){alert('Semana cerrada: disponible únicamente para consulta.');return;} return moveActivoBase(x,d); }
+        $('week').onchange=()=>{ opts('dest',sourceForFilters().map(x=>x.destination)); buildDates(); updateClosedUI(); render(); };
 
     </script>
 </body>

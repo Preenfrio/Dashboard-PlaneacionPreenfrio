@@ -157,25 +157,72 @@ def fast_automatic(jobs, initial_clocks=None):
     return assignments
 
 
-def calculate(transient_overrides=None):
-    """Calcula el plan y aplica inmediatamente los cambios enviados por las flechas.
+def _plan_datetime(plan, *names):
+    for name in names:
+        value = plan.get(name)
+        parsed = parse_dt(value)
+        if parsed:
+            return parsed
+    return None
 
-    Los cambios tambien se guardan en Supabase, pero la respuesta no depende de
-    volver a leer la base para reflejar el nuevo orden.
-    """
-    jobs, plans = load_jobs_and_plan()
-    cierre = cierres_runtime.obtener_ultimo_cierre(DB)
-    jobs = cierres_runtime.filtrar_semanas_cerradas(jobs, cierre)
-    initial_clocks = cierres_runtime.relojes_iniciales(cierre)
+
+def historical_rows(jobs, plans, closures):
+    """Representación histórica de solo lectura, sin recalcular ciclos cerrados."""
+    closure_keys = cierres_runtime.claves_cerradas(closures)
+    result = []
+    for position, job in enumerate(jobs, 1):
+        iso = job["process_date"].isocalendar()
+        if (int(iso.year), int(iso.week)) not in closure_keys:
+            continue
+        plan = dict(plans.get(job["key"], {}))
+        assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
+        if assignment_type == "DIRECTO_SIN_PREENFRIO":
+            origin = "DIRECTO SIN PREENFRIO"
+        else:
+            origin = plan.get("preenfrio_manual") or plan.get("preenfrio_sugerido") or "SIN REGISTRO"
+        start = _plan_datetime(plan, "fecha_ingreso", "ingreso_calculado", "inicio_calculado")
+        end = _plan_datetime(plan, "fecha_despacho", "despacho_calculado", "fin_calculado")
+        status = str(plan.get("cumplimiento") or plan.get("estado_cumplimiento") or "CERRADA")
+        try:
+            order = int(plan.get("orden_manual") or plan.get("orden_sugerido") or position)
+        except (TypeError, ValueError):
+            order = position
+        result.append({
+            **job,
+            "assigned_origin": origin,
+            "assigned_distance_km": None,
+            "order": order,
+            "start": start,
+            "end": end,
+            "pre_cooling_end": end,
+            "dispatch": end,
+            "arrival": None,
+            "conservation_wait_h": None,
+            "portions": [],
+            "slack_h": None,
+            "status": status,
+            "read_only": True,
+            "closed": True,
+            "closed_year": int(iso.year),
+            "closed_week": int(iso.week),
+        })
+    return result
+
+
+def calculate(transient_overrides=None):
+    """Calcula solo semanas abiertas y devuelve histórico cerrado separado."""
+    all_jobs, plans = load_jobs_and_plan()
+    closures = cierres_runtime.obtener_cierres(DB)
+    latest_closure = closures[-1] if closures else None
+    jobs, closed_jobs = cierres_runtime.separar_activos_historicos(all_jobs, closures)
+    initial_clocks = cierres_runtime.relojes_iniciales(latest_closure)
     transient_overrides = transient_overrides or {}
     automatic_assignments = fast_automatic(jobs, initial_clocks)
     queues = {"NELLY": [], "FORTALEZA": []}
     direct = []
-
     for job in jobs:
         if job["key"] not in automatic_assignments:
             continue
-
         plan = dict(plans.get(job["key"], {}))
         immediate_change = transient_overrides.get(job["key"])
         if immediate_change:
@@ -189,10 +236,8 @@ def calculate(transient_overrides=None):
             elif immediate_origin in ("NELLY", "FORTALEZA"):
                 plan["preenfrio_manual"] = immediate_origin
                 plan["tipo_asignacion"] = "MANUAL"
-
         suggested = automatic_assignments[job["key"]]
         assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
-
         if assignment_type == "DIRECTO_SIN_PREENFRIO":
             origin = "DIRECTO SIN PREENFRIO"
         else:
@@ -203,54 +248,48 @@ def calculate(transient_overrides=None):
             origin = plan.get("preenfrio_manual") if is_manual else suggested["origin"]
             if origin not in permitted:
                 origin = suggested["origin"] if suggested["origin"] in permitted else permitted[0]
-
         try:
             order = int(plan.get("orden_manual") or suggested["order"])
         except (TypeError, ValueError):
             order = int(suggested["order"])
-
         item = {
             **job,
             "manual_order": order,
             "suggested_origin": suggested["origin"],
             "suggested_order": suggested["order"],
+            "read_only": False,
+            "closed": False,
         }
         if origin == "DIRECTO SIN PREENFRIO":
             direct.append(item)
         else:
             queues[origin].append(item)
-
     rows, cycles = [], []
     for origin in ("NELLY", "FORTALEZA"):
         packed_rows, packed_cycles = core.pack(origin, queues[origin], initial_clocks.get(origin))
         rows.extend(packed_rows)
         cycles.extend(packed_cycles)
-
-    for order, job in enumerate(
-        sorted(direct, key=lambda item: (core.release_time(item), core.deadline(item))), 1
-    ):
+    for order, job in enumerate(sorted(direct, key=lambda item: (core.release_time(item), core.deadline(item))), 1):
         dispatch = core.release_time(job)
         arrival = dispatch + timedelta(hours=job["transit_h"])
         slack = (job["appointment"] - arrival).total_seconds() / 3600
-        rows.append(
-            {
-                **job,
-                "assigned_origin": "DIRECTO SIN PREENFRIO",
-                "assigned_distance_km": None,
-                "order": order,
-                "start": dispatch,
-                "end": dispatch,
-                "pre_cooling_end": dispatch,
-                "dispatch": dispatch,
-                "arrival": arrival,
-                "conservation_wait_h": 0.0,
-                "portions": [],
-                "slack_h": slack,
-                "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
-            }
-        )
-    return rows, cycles, plans
-
+        rows.append({
+            **job,
+            "assigned_origin": "DIRECTO SIN PREENFRIO",
+            "assigned_distance_km": None,
+            "order": order,
+            "start": dispatch,
+            "end": dispatch,
+            "pre_cooling_end": dispatch,
+            "dispatch": dispatch,
+            "arrival": arrival,
+            "conservation_wait_h": 0.0,
+            "portions": [],
+            "slack_h": slack,
+            "status": "CUMPLE" if slack >= 0 else "NO CUMPLE",
+        })
+    historical = historical_rows(closed_jobs, plans, closures)
+    return rows, cycles, plans, historical, closures
 
 def json_value(value):
     """Conversión recursiva a tipos compatibles con JSON."""
@@ -272,32 +311,35 @@ def json_value(value):
     return value
 
 
-def serialise(rows, cycles):
+def serialise(rows, cycles, historical, closures):
     row_fields = [
         "key", "farm", "destination", "client", "process_date", "appointment",
         "transit_h", "critical", "pallets", "week", "assigned_origin",
         "assigned_distance_km", "distance_options_km", "location_found", "order",
         "start", "end", "pre_cooling_end", "dispatch", "arrival",
         "conservation_wait_h", "portions", "slack_h", "status",
+        "read_only", "closed", "closed_year", "closed_week",
     ]
     cycle_fields = [
         "cycle_no", "origin", "process_date", "start", "end", "duration_h",
         "capacity", "used_pallets", "free_pallets", "loads",
     ]
+    encode_rows = lambda source: [
+        {field: json_value(row.get(field)) for field in row_fields}
+        for row in source
+    ]
     return {
         "ok": True,
         "source": "SUPABASE",
-        "version": "2.7.0",
-        "data": [
-            {field: json_value(row.get(field)) for field in row_fields}
-            for row in rows
-        ],
+        "version": "2.8.0",
+        "data": encode_rows(rows),
+        "historical_data": encode_rows(historical),
+        "closures": [json_value(cierres_runtime.cierre_publico(row)) for row in closures],
         "cycles": [
             {field: json_value(cycle.get(field)) for field in cycle_fields}
             for cycle in cycles
         ],
     }
-
 
 def payload(force=False, transient_overrides=None):
     with LOCK:
@@ -308,12 +350,41 @@ def payload(force=False, transient_overrides=None):
             and now - CACHE["time"] < CACHE_SECONDS
         ):
             return CACHE["payload"]
-        rows, cycles, _ = calculate(transient_overrides)
-        CACHE.update(payload=serialise(rows, cycles), time=now)
+        rows, cycles, _, historical, closures = calculate(transient_overrides)
+        CACHE.update(payload=serialise(rows, cycles, historical, closures), time=now)
         return CACHE["payload"]
 
 
 def save_overrides(overrides):
+    """Guarda cambios solo para procesos de semanas abiertas."""
+    if not overrides:
+        return
+    closures = cierres_runtime.obtener_cierres(DB)
+    closed_keys = cierres_runtime.claves_cerradas(closures)
+    ids = list(overrides)
+    source_rows = []
+    for start_index in range(0, len(ids), 100):
+        batch = ids[start_index:start_index + 100]
+        source_rows.extend(
+            DB.table("procesos_fuente")
+            .select("proceso_id,fecha_proceso")
+            .in_("proceso_id", batch)
+            .execute()
+            .data or []
+        )
+    source_by_id = {row["proceso_id"]: row for row in source_rows}
+    blocked = []
+    for process_id in ids:
+        row = source_by_id.get(process_id)
+        process_date = parse_dt(row.get("fecha_proceso")) if row else None
+        if process_date:
+            iso = process_date.isocalendar()
+            if (int(iso.year), int(iso.week)) in closed_keys:
+                blocked.append(process_id)
+    if blocked:
+        raise PermissionError(
+            "Semana cerrada en modo solo consulta. No se permiten cambios manuales."
+        )
     modified_at = datetime.now().astimezone().isoformat()
     for process_id, change in overrides.items():
         origin = change.get("origin")
@@ -327,7 +398,6 @@ def save_overrides(overrides):
         elif origin in ("NELLY", "FORTALEZA"):
             values.update(preenfrio_manual=origin, tipo_asignacion="MANUAL")
         DB.table("procesos_planificacion").update(values).eq("proceso_id", process_id).execute()
-
 
 def export_bytes():
     current = payload()
@@ -414,7 +484,7 @@ class Handler(core.H):
 
 
 if __name__ == "__main__":
-    print(f"Planeador Supabase V2.7.0: http://{HOST}:{PORT}")
+    print(f"Planeador Supabase V2.8.0: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()

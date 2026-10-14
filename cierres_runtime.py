@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Lectura segura de cierres semanales para el planeador.
 
-Este módulo no modifica Supabase. Expone:
-- obtener_ultimo_cierre(db)
-- filtrar_semanas_cerradas(jobs, cierre)
-- relojes_iniciales(cierre)
-
-Los timestamptz se convierten a America/Mexico_City y se devuelven como
-`datetime` locales sin tzinfo para ser compatibles con el motor actual.
+No modifica Supabase. Separa la cola activa del histórico cerrado y convierte
+los timestamptz a la zona operativa America/Mexico_City.
 """
 from __future__ import annotations
 
@@ -26,54 +21,79 @@ def _parse_local(value):
     return parsed.astimezone(ZONA_OPERATIVA).replace(tzinfo=None)
 
 
-def obtener_ultimo_cierre(db):
-    """Devuelve el cierre CERRADA más reciente o None."""
+def obtener_cierres(db):
+    """Devuelve todos los cierres CERRADA ordenados por año y semana."""
     rows = (
         db.table("cierres_semanales")
         .select(
-            "anio,semana,estado,ultimo_fin_nelly,disponible_nelly_desde,"
-            "ultimo_fin_fortaleza,disponible_fortaleza_desde,"
+            "id,anio,semana,estado,fecha_cierre,ultimo_fin_nelly,"
+            "disponible_nelly_desde,ultimo_fin_fortaleza,"
+            "disponible_fortaleza_desde,procesos_terminados,"
+            "procesos_terminados_sin_tiempo,procesos_directos,"
             "procesos_pendientes,tarimas_pendientes"
         )
         .eq("estado", "CERRADA")
-        .order("anio", desc=True)
-        .order("semana", desc=True)
-        .limit(1)
+        .order("anio", desc=False)
+        .order("semana", desc=False)
         .execute()
         .data
     )
-    if not rows:
+    result = []
+    for source in rows or []:
+        row = dict(source)
+        row["anio"] = int(row["anio"])
+        row["semana"] = int(row["semana"])
+        row["ultimo_fin_nelly_local"] = _parse_local(row.get("ultimo_fin_nelly"))
+        row["disponible_nelly_local"] = _parse_local(row.get("disponible_nelly_desde"))
+        row["ultimo_fin_fortaleza_local"] = _parse_local(row.get("ultimo_fin_fortaleza"))
+        row["disponible_fortaleza_local"] = _parse_local(row.get("disponible_fortaleza_desde"))
+        result.append(row)
+    return result
+
+
+def obtener_ultimo_cierre(db):
+    cierres = obtener_cierres(db)
+    return cierres[-1] if cierres else None
+
+
+def claves_cerradas(cierres):
+    return {(int(row["anio"]), int(row["semana"])) for row in cierres or []}
+
+
+def clave_semana_job(job):
+    process_date = job.get("process_date")
+    if not process_date:
         return None
-    row = dict(rows[0])
-    row["anio"] = int(row["anio"])
-    row["semana"] = int(row["semana"])
-    row["disponible_nelly_local"] = _parse_local(row.get("disponible_nelly_desde"))
-    row["disponible_fortaleza_local"] = _parse_local(row.get("disponible_fortaleza_desde"))
-    return row
+    iso = process_date.isocalendar()
+    return int(iso.year), int(iso.week)
+
+
+def es_semana_cerrada(job, cierres):
+    return clave_semana_job(job) in claves_cerradas(cierres)
+
+
+def separar_activos_historicos(jobs, cierres):
+    """Separa procesos activos e históricos sin recalcular semanas cerradas."""
+    closed = claves_cerradas(cierres)
+    active, historical = [], []
+    for job in jobs:
+        key = clave_semana_job(job)
+        if key in closed:
+            historical.append(job)
+        else:
+            active.append(job)
+    return active, historical
 
 
 def filtrar_semanas_cerradas(jobs, cierre):
-    """Quita de la cola activa todos los procesos hasta la semana cerrada.
-
-    La comparación usa (año ISO, semana ISO). El campo `week` se conserva para
-    la interfaz, pero la fecha de proceso es la autoridad para el corte.
-    """
+    """Compatibilidad: conserva solo trabajos posteriores al último cierre."""
     if not cierre:
         return list(jobs)
     limite = (int(cierre["anio"]), int(cierre["semana"]))
-    activos = []
-    for job in jobs:
-        process_date = job.get("process_date")
-        if not process_date:
-            continue
-        iso = process_date.isocalendar()
-        if (int(iso.year), int(iso.week)) > limite:
-            activos.append(job)
-    return activos
+    return [job for job in jobs if clave_semana_job(job) and clave_semana_job(job) > limite]
 
 
 def relojes_iniciales(cierre):
-    """Relojes independientes por cámara para iniciar la cola activa."""
     if not cierre:
         return {"NELLY": None, "FORTALEZA": None}
     return {
@@ -82,8 +102,15 @@ def relojes_iniciales(cierre):
     }
 
 
-def aplicar_reloj_inicial(jobs, origin, inicio):
-    """Adjunta el reloj inicial a trabajos sin alterar su fecha de producción."""
-    if inicio is None:
-        return jobs
-    return [{**job, "clock_floor": inicio} for job in jobs]
+def cierre_publico(row):
+    """Versión serializable y segura para el navegador."""
+    if not row:
+        return None
+    fields = (
+        "id", "anio", "semana", "estado", "fecha_cierre",
+        "ultimo_fin_nelly_local", "disponible_nelly_local",
+        "ultimo_fin_fortaleza_local", "disponible_fortaleza_local",
+        "procesos_terminados", "procesos_terminados_sin_tiempo",
+        "procesos_directos", "procesos_pendientes", "tarimas_pendientes",
+    )
+    return {field: row.get(field) for field in fields}
