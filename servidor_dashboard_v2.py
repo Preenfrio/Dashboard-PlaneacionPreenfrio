@@ -676,7 +676,7 @@ def serial(rows, cycles):
     ]
     return {
         "ok": True,
-        "version": "2.8.0",
+        "version": "2.9.0",
         "excel": EXCEL.name,
         "modified": datetime.fromtimestamp(EXCEL.stat().st_mtime).isoformat(timespec="seconds"),
         "data": [
@@ -783,7 +783,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Planeador V2.8.0: http://{HOST}:{PORT}")
+    print(f"Planeador V2.9.0: http://{HOST}:{PORT}")
     server = ThreadingHTTPServer((HOST, PORT), H)
     if HOST == "127.0.0.1":
         threading.Timer(0.6, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
