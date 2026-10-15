@@ -101,46 +101,66 @@ def fetch_all(db, table, select="*", chunk=1000):
         start += chunk
 
 
-def build_jobs(db, year, week):
+def build_jobs(db, planeacion_path, year, week):
+    """Lee la hoja PLANEACION como autoridad del histórico.
+
+    Supabase solo aporta proceso_id y decisiones manuales cuando existe una
+    coincidencia exacta. Así ninguna fila válida del Excel desaparece porque
+    actualmente esté inactiva o ya no exista en procesos_fuente.
+    """
+    frame = pd.read_excel(planeacion_path, sheet_name="PLANEACION", engine="openpyxl")
+    cols = headers(frame)
+    names = {
+        "sku": pick(cols, "SKU", required=True), "lote": pick(cols, "Lote", required=True),
+        "farm": pick(cols, "Finca", required=True), "destination": pick(cols, "Destino", required=True),
+        "pallets": pick(cols, "Pallets", required=True), "process_date": pick(cols, "Fecha de proceso", required=True),
+        "appointment": pick(cols, "FECHA CITA", required=True), "client": pick(cols, "CLIENTE"),
+        "transit": pick(cols, "HORAS TRANSITO"), "critical": pick(cols, "NIVEL CRITICO"),
+        "quantity": pick(cols, "Cantidad"),
+    }
     source = fetch_all(db, "procesos_fuente", "*,procesos!inner(id,activo_fuente)")
     plans = {row["proceso_id"]: row for row in fetch_all(db, "procesos_planificacion")}
-    catalogue = core.read_catalogue()
-    locations, precoolers = core.read_locations()
-    jobs = []
-    for index, original in enumerate(source, 1):
-        row = dict(original)
-        process = row.pop("procesos")
-        if not process.get("activo_fuente", True):
+    by_exact = defaultdict(list)
+    for original in source:
+        row = dict(original); process = row.pop("procesos")
+        process_date = as_datetime(row.get("fecha_proceso")); appointment = as_datetime(row.get("fecha_cita"))
+        try: pallets = float(row.get("pallets") or 0)
+        except (TypeError, ValueError): pallets = 0
+        if not process_date: continue
+        exact = (norm(row.get("sku")), norm(row.get("lote")), norm(row.get("finca")), norm(row.get("destino")), process_date.date().isoformat(), appointment.date().isoformat() if appointment else "", round(pallets,6))
+        by_exact[exact].append(process["id"])
+    used_process_ids = set()
+    catalogue = core.read_catalogue(); locations, precoolers = core.read_locations(); jobs=[]
+    for index, row in frame.iterrows():
+        process_date=as_datetime(row[names["process_date"]]); appointment=as_datetime(row[names["appointment"]])
+        if not process_date or process_date.isocalendar()[:2] != (year,week) or not appointment: continue
+        try: pallets=float(row[names["pallets"]])
+        except (TypeError,ValueError): continue
+        if not math.isfinite(pallets) or pallets <= 0:
             continue
-        process_date = as_datetime(row.get("fecha_proceso"))
-        appointment = as_datetime(row.get("fecha_cita"))
-        if not process_date or process_date.isocalendar()[:2] != (year, week):
-            continue
-        destination = str(row.get("destino") or "").strip()
-        info = catalogue.get(core.norm(destination))
-        if not info or not appointment:
-            continue
-        try:
-            pallets = float(row.get("pallets") or 0)
-        except (TypeError, ValueError):
-            continue
-        if pallets <= 0:
-            continue
-        farm = str(row.get("finca") or "").strip()
-        coordinate = locations.get(core.norm(farm))
-        distances = {origin: core.haversine_km(coordinate, precooler) for origin, precooler in precoolers.items()}
-        jobs.append({
-            "key": process["id"], "source": index, "farm": farm,
-            "destination": destination, "client": core.norm(row.get("cliente") or info["client"]),
-            "process_date": process_date.replace(hour=0, minute=0, second=0, microsecond=0),
-            "appointment": appointment, "transit_h": float(row.get("horas_transito") or info["transit_h"]),
-            "critical": int(row.get("nivel_critico") or info["critical"]), "pallets": pallets,
-            "week": str(week), "cycle_options": info["cycle"], "distance_options_km": distances,
-            "location_found": coordinate is not None, "sku": row.get("sku"), "lote": row.get("lote"),
-            "cantidad": row.get("cantidad"), "plan": plans.get(process["id"], {}),
-        })
+        farm=str(row[names["farm"]] or "").strip(); destination=str(row[names["destination"]] or "").strip(); sku=row[names["sku"]]; lote=row[names["lote"]]
+        info=catalogue.get(core.norm(destination))
+        if not info: continue
+        exact=(norm(sku),norm(lote),norm(farm),norm(destination),process_date.date().isoformat(),appointment.date().isoformat(),round(pallets,6))
+        available=[pid for pid in by_exact.get(exact,[]) if pid not in used_process_ids]
+        process_id=available[0] if available else None
+        if process_id: used_process_ids.add(process_id)
+        # La clave usada por pack debe ser única por fila del Excel. Un mismo
+        # proceso_id puede aparecer en más de una versión/fila de procesos_fuente
+        # y no debe colisionar en el diccionario remaining del motor.
+        key=f"SNAPSHOT|{year}|{week}|{index+2}"
+        coordinate=locations.get(core.norm(farm)); distances={origin:core.haversine_km(coordinate,precooler) for origin,precooler in precoolers.items()}
+        try: transit=float(row[names["transit"]]) if names["transit"] and not pd.isna(row[names["transit"]]) else float(info["transit_h"])
+        except: transit=float(info["transit_h"])
+        try: critical=int(float(row[names["critical"]])) if names["critical"] and not pd.isna(row[names["critical"]]) else int(info["critical"])
+        except: critical=int(info["critical"])
+        jobs.append({"key":key,"process_id":process_id,"source":index+2,"farm":farm,"destination":destination,
+            "client":core.norm(row[names["client"]]) if names["client"] and not pd.isna(row[names["client"]]) else info["client"],
+            "process_date":process_date.replace(hour=0,minute=0,second=0,microsecond=0),"appointment":appointment,"transit_h":transit,
+            "critical":critical,"pallets":pallets,"week":str(week),"cycle_options":info["cycle"],"distance_options_km":distances,
+            "location_found":coordinate is not None,"sku":sku,"lote":lote,"cantidad":row[names["quantity"]] if names["quantity"] else None,
+            "plan":plans.get(process_id,{}) if process_id else {}})
     return jobs
-
 
 def calculate_week_plan(jobs):
     queues = {"NELLY": [], "FORTALEZA": []}
@@ -150,12 +170,19 @@ def calculate_week_plan(jobs):
     for job in ordered:
         plan = job.get("plan", {})
         assignment_type = plan.get("tipo_asignacion") or "AUTOMATICA"
-        if assignment_type == "DIRECTO_SIN_PREENFRIO":
+        destination_direct = norm(job.get("destination")) in {"CEDA", "JAPON"}
+        # Regla operativa confirmada para el cierre: CEDA y Japón son directos.
+        # En el catálogo tienen ciclos Nelly/Fortaleza en cero, por eso antes
+        # quedaban fuera de `planned` y el resumen mostraba 77 en lugar de 91.
+        if assignment_type == "DIRECTO_SIN_PREENFRIO" or destination_direct:
             direct.append({**job, "manual_order": 0})
             continue
         manual = assignment_type == "MANUAL" and plan.get("preenfrio_manual")
         allowed = core.manual_allowed(job) if manual else core.allowed(job)
         if not allowed:
+            # El histórico nunca descarta planeación. Si una fila válida no tiene
+            # ciclo habilitado en catálogo, se conserva como directo sin preenfrío.
+            direct.append({**job, "manual_order": 0})
             continue
         if manual in allowed:
             origin = manual
@@ -206,6 +233,8 @@ def read_movements(path, year, week):
         try:
             pallets = float(source[columns["pallets"]])
         except (TypeError, ValueError):
+            continue
+        if not math.isfinite(pallets) or pallets <= 0:
             continue
         row = {
             "source_row": index + 2, "sku": source[columns["sku"]], "lote": source[columns["lote"]],
@@ -266,7 +295,13 @@ def main():
     if not closure_rows:
         raise SystemExit("No existe un cierre CERRADA para la semana solicitada")
     closure = closure_rows[0]
-    jobs = build_jobs(db, args.anio, args.semana)
+    jobs = build_jobs(db, Path(args.planeacion), args.anio, args.semana)
+    invalid_pallet_jobs = [job for job in jobs if not math.isfinite(float(job["pallets"])) or float(job["pallets"]) <= 0]
+    if invalid_pallet_jobs:
+        raise ValueError(f"Hay {len(invalid_pallet_jobs)} procesos con pallets inválidos antes de calcular")
+    keys = [job["key"] for job in jobs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("El snapshot contiene claves internas duplicadas antes de calcular la planeación")
     planned = calculate_week_plan(jobs)
     movements = read_movements(Path(args.movimientos), args.anio, args.semana)
     real_by_id = match_real(planned, movements)
@@ -294,7 +329,7 @@ def main():
             state = "DIRECTO_SIN_PREENFRIO"
         snapshot_key = f"{row['key']}|{args.anio}|{args.semana}"
         payloads.append({
-            "cierre_id": closure["id"], "proceso_id": row["key"], "anio": args.anio, "semana": args.semana,
+            "cierre_id": closure["id"], "proceso_id": row.get("process_id"), "anio": args.anio, "semana": args.semana,
             "snapshot_key": snapshot_key, "fecha_proceso": iso(row["process_date"]), "fecha_cita": iso(row["appointment"]),
             "finca": row.get("farm"), "cliente": row.get("client"), "destino": destination,
             "sku": row.get("sku"), "lote": row.get("lote"), "pallets": row.get("pallets"),
