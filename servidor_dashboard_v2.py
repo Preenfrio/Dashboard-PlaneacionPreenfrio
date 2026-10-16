@@ -351,9 +351,14 @@ def pack(origin, sequence, initial_time=None):
     remaining = {job["key"]: float(job["pallets"]) for job in sequence}
     first, last, portions, cycles = {}, {}, {}, []
     pending = list(sequence)
-    current = min(release_time(job) for job in pending)
+    first_release = min(release_time(job) for job in pending)
 
-    while pending:
+current = (
+    initial_time
+    if initial_time is not None
+    else first_release
+)
+while pending:
         available = [
             job
             for job in pending
