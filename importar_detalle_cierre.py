@@ -14,6 +14,7 @@ import unicodedata
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from supabase import create_client
@@ -70,8 +71,15 @@ def hours(value):
     return core.hours(value)
 
 
+ZONA_OPERATIVA = ZoneInfo("America/Mexico_City")
+
 def iso(value):
-    return value.isoformat(timespec="minutes") if value else None
+    """Guarda el tiempo operativo con zona explícita; evita restar 6 horas."""
+    if not value:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZONA_OPERATIVA)
+    return value.isoformat(timespec="minutes")
 
 
 def base_key(row):
