@@ -353,12 +353,13 @@ def pack(origin, sequence, initial_time=None):
     pending = list(sequence)
     first_release = min(release_time(job) for job in pending)
 
-current = (
-    initial_time
-    if initial_time is not None
-    else first_release
-)
-while pending:
+    current = (
+        initial_time
+        if initial_time is not None
+        else first_release
+    )
+
+    while pending:
         available = [
             job
             for job in pending
